@@ -1,0 +1,59 @@
+[package]
+name = "tf-rust-engineio"
+version = "0.6.1"
+authors = ["A2C-SMCP"]
+edition = "2021"
+description = "An Engine.IO client implementation in Rust. Fork of rust_engineio with ACK support and reconnect enhancements."
+readme = "README.md"
+repository = "https://github.com/A2C-SMCP/tf-rust-socketio"
+keywords = ["engineio", "network", "protocol", "client"]
+categories = ["network-programming", "web-programming", "web-programming::websocket"]
+license = "MIT"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
+
+[dependencies]
+base64 = "0.22.1"
+bytes = "1"
+reqwest = { version = "0.12.4", features = ["blocking", "native-tls", "stream"] }
+adler32 = "1.2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+http = "1.1.0"
+tokio-tungstenite = { version = "0.21.0", features = ["native-tls"] }
+tungstenite = "0.21.0"
+tokio = "1.40.0"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+async-trait = "0.1.83"
+async-stream = "0.3.6"
+thiserror = "1.0"
+native-tls = "0.2.12"
+url = "2.5.4"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["async_tokio"] }
+lazy_static = "1.4.0"
+
+[dev-dependencies.tokio]
+version = "1.40.0"
+# we need the `#[tokio::test]` macro
+features = ["macros"]
+
+[[bench]]
+name = "engineio"
+harness = false
+
+# needs to be present in order to support the benchmark
+# ci job
+# source: https://bheisler.github.io/criterion.rs/book/faq.html#cargo-bench-gives-unrecognized-option-errors-for-valid-command-line-options
+[lib]
+bench = false
+
+[features]
+default = ["async"]
+async-callbacks = []
+async = ["async-callbacks"]

@@ -1,0 +1,43 @@
+name: Build and code style
+
+on:
+  push:
+    branches: [main, refactoring]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup rust environment
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
+
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --verbose --all-features
+      - name: Linting
+        run: cargo clippy --verbose --all-features
+      - name: Check formatting
+        run: cargo fmt --all -- --check

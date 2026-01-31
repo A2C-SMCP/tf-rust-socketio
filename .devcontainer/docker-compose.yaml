@@ -1,0 +1,76 @@
+version: '3'
+services:
+    node-engine-io-secure:
+        build:
+            context: ../ci
+        command: [ "node", "/test/engine-io-secure.js" ]
+        ports:
+            - "4202:4202"
+        environment:
+            - "DEBUG=*"
+    node-engine-io:
+        build:
+            context: ../ci
+        command: [ "node", "/test/engine-io.js" ]
+        ports:
+            - "4201:4201"
+        environment:
+            - "DEBUG=*"
+    node-engine-io-polling:
+        build:
+            context: ../ci
+        command: [ "node", "/test/engine-io-polling.js" ]
+        ports:
+            - "4203:4203"
+        environment:
+            - "DEBUG=*"
+    node-socket-io:
+        build:
+            context: ../ci
+        command: [ "node", "/test/socket-io.js" ]
+        ports:
+            - "4200:4200"
+        environment:
+            - "DEBUG=*"
+    node-socket-io-auth:
+        build:
+            context: ../ci
+        command: [ "node", "/test/socket-io-auth.js" ]
+        ports:
+            - "4204:4204"
+        environment:
+            - "DEBUG=*"
+    node-socket-restart:
+        build:
+            context: ../ci
+        command: [ "node", "/test/socket-io-restart.js" ]
+        ports:
+            - "4205:4205"
+        environment:
+            - "DEBUG=*"
+    node-socket-restart-url-auth:
+        build:
+            context: ../ci
+        command: [ "node", "/test/socket-io-restart-url-auth.js" ]
+        ports:
+            - "4206:4206"
+        environment:
+            - "DEBUG=*"
+    rust-client:
+        build: 
+            context: .. 
+            dockerfile: ./.devcontainer/Dockerfile
+        command: /bin/sh -c "while sleep 10000d; do :; done"
+        security_opt:
+            - seccomp:unconfined
+        volumes: 
+            - "..:/workspace/rust-socketio"
+        environment:
+            - "SOCKET_IO_SERVER=http://node-socket-io:4200"
+            - "SOCKET_IO_AUTH_SERVER=http://node-socket-io-auth:4204"
+            - "ENGINE_IO_SERVER=http://node-engine-io:4201"
+            - "ENGINE_IO_SECURE_SERVER=https://node-engine-io-secure:4202"
+            - "ENGINE_IO_SECURE_HOST=node-engine-io-secure"
+            - "ENGINE_IO_POLLING_SERVER=http://node-engine-io-polling:4203"
+            - "SOCKET_IO_RESTART_SERVER=http://node-socket-restart:4205"
+            - "SOCKET_IO_RESTART_URL_AUTH_SERVER=http://node-socket-restart-url-auth:4206"
