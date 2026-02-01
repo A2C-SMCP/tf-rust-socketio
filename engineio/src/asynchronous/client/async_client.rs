@@ -378,8 +378,9 @@ mod test {
 
         // test missing match arm in socket constructor
         let mut headers = HeaderMap::default();
+        // Use the correct Host header value including the port
         let host =
-            std::env::var("ENGINE_IO_SECURE_HOST").unwrap_or_else(|_| "localhost".to_owned());
+            std::env::var("ENGINE_IO_SECURE_HOST").unwrap_or_else(|_| "localhost:4201".to_owned());
         headers.insert(HOST, host);
 
         let _ = builder(url.clone())
