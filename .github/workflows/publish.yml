@@ -32,8 +32,8 @@ jobs:
       - name: Dry-run publish (engineio)
         run: cargo publish --dry-run -p tf-rust-engineio
 
-      - name: Dry-run publish (socketio)
-        run: cargo publish --dry-run -p tf-rust-socketio
+      # Note: socketio dry-run is skipped because it depends on engineio
+      # which may not be on crates.io yet. The actual publish will validate.
 
   publish:
     name: Publish
@@ -55,7 +55,7 @@ jobs:
 
       # 等待 crates.io 索引更新
       - name: Wait for crates.io index
-        run: sleep 30
+        run: sleep 60
 
       - name: Publish socketio
         run: cargo publish -p tf-rust-socketio --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
