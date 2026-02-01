@@ -1,6 +1,6 @@
 [package]
 name = "tf-rust-socketio"
-version = "0.6.1"
+version = "0.7.0"
 authors = ["A2C-SMCP"]
 edition = "2021"
 description = "A Socket.IO client implementation in Rust. Fork of rust_socketio with server-to-client ACK support, reconnect headers, and close reason enhancements."
@@ -17,7 +17,7 @@ all-features = true
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 
 [dependencies]
-tf-rust-engineio = { version = "0.6.1", path = "../engineio" }
+tf-rust-engineio = { version = "0.7.0", path = "../engineio" }
 base64 = "0.22.1"
 bytes = "1"
 backoff = "0.4"

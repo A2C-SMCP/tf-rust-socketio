@@ -1,6 +1,6 @@
 [package]
 name = "tf-rust-engineio"
-version = "0.6.1"
+version = "0.7.0"
 authors = ["A2C-SMCP"]
 edition = "2021"
 description = "An Engine.IO client implementation in Rust. Fork of rust_engineio with ACK support and reconnect enhancements."
