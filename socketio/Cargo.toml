@@ -21,7 +21,7 @@ tf-rust-engineio = { version = "0.6.1", path = "../engineio" }
 base64 = "0.22.1"
 bytes = "1"
 backoff = "0.4"
-rand = "0.8.5"
+rand = "0.9.2"
 adler32 = "1.2.0"
 serde_json = "1.0"
 thiserror = "1.0"
