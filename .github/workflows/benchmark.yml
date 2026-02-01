@@ -1,57 +1,67 @@
-on:
-   pull_request:
-     types: [opened]
-   issue_comment:
-     types: [created]
+name: Benchmark
 
-name: benchmark engine.io
+on:
+  pull_request:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
 jobs:
-   runBenchmark:
-     name: run benchmark
-     runs-on: ubuntu-latest
-     steps:
-      - uses: khan/pull-request-comment-trigger@master
+  benchmark:
+    name: Run Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for benchmark trigger
+        uses: khan/pull-request-comment-trigger@master
         id: check
         with:
           trigger: '/benchmark'
           reaction: rocket
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-      - name: Checkout repository
-        if: steps.check.outputs.triggered == 'true'
-        uses: actions/checkout@v2
-      - name: Setup rust environment 
-        if: steps.check.outputs.triggered == 'true'
-        uses: actions-rs/toolchain@v1
-        with:
-             profile: minimal
-             toolchain: stable
-             override: true
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup docker
+      - name: Checkout
         if: steps.check.outputs.triggered == 'true'
-        id: buildx
-        uses: docker/setup-buildx-action@v1
+        uses: actions/checkout@v4
 
-      - name: Generate keys
+      - name: Setup Rust
+        if: steps.check.outputs.triggered == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        if: steps.check.outputs.triggered == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Docker Buildx
+        if: steps.check.outputs.triggered == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate TLS keys
         if: steps.check.outputs.triggered == 'true'
         run: make keys
 
-      - name: Build docker container
+      - name: Build and start test server
         if: steps.check.outputs.triggered == 'true'
         run: |
           cd ci && docker build -t test_suite:latest .
-          docker run -d -p 4200:4200 -p 4201:4201 -p 4202:4202 -p 4203:4203 -p 4204:4204 -p 4205:4205 -p 4206:4206 test_suite:latest
+          docker run -d --name test_suite \
+            -p 4200:4200 -p 4201:4201 -p 4202:4202 \
+            -p 4203:4203 -p 4204:4204 -p 4205:4205 -p 4206:4206 \
+            test_suite:latest
+
       - name: Extract branch name
         if: steps.check.outputs.triggered == 'true'
-        shell: bash
-        run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
         id: extract_branch
-      - uses: actions/checkout@master
+        run: echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+
+      - name: Run benchmark comparison
         if: steps.check.outputs.triggered == 'true'
-      - uses: boa-dev/criterion-compare-action@v3.2.0
-        if: steps.check.outputs.triggered == 'true'
+        uses: boa-dev/criterion-compare-action@v3.2.0
         with:
           cwd: "engineio"
           branchName: ${{ steps.extract_branch.outputs.branch }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Stop test server
+        if: always() && steps.check.outputs.triggered == 'true'
+        run: docker stop test_suite || true

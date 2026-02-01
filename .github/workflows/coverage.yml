@@ -1,67 +1,69 @@
+name: Coverage
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
-name: generate coverage
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Setup Rust project
+  coverage:
+    name: Code Coverage
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Setup rust environment
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Setup docker
-        id: buildx
-        uses: docker/setup-buildx-action@v1
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: Generate keys
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate TLS keys
         run: make keys
 
-      - name: Build docker container
+      - name: Build and start test server
         run: |
           cd ci && docker build -t test_suite:latest .
-          docker run -d --name test_suite -p 4200:4200 -p 4201:4201 -p 4202:4202 -p 4203:4203 -p 4204:4204 -p 4205:4205 -p 4206:4206 test_suite:latest
+          docker run -d --name test_suite \
+            -p 4200:4200 -p 4201:4201 -p 4202:4202 \
+            -p 4203:4203 -p 4204:4204 -p 4205:4205 -p 4206:4206 \
+            test_suite:latest
 
-      - uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Wait for server
+        run: sleep 5
 
       - name: Generate code coverage
         run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v1.5.2
+        uses: codecov/codecov-action@v4
         with:
-          token: ${{secrets.CODECOV_TOKEN}}
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
       - name: Collect docker logs
         if: always()
-        run: docker logs test_suite > my_logs.txt 2>&1
+        run: docker logs test_suite > docker_logs.txt 2>&1
 
       - name: Upload docker logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: docker logs
-          path: my_logs.txt
+          name: docker-logs
+          path: docker_logs.txt
+
+      - name: Stop test server
+        if: always()
+        run: docker stop test_suite || true
