@@ -1,6 +1,6 @@
-use tf_rust_socketio::{ClientBuilder, Payload, RawClient};
 use serde_json::json;
 use std::time::Duration;
+use tf_rust_socketio::{ClientBuilder, Payload, RawClient};
 
 fn main() {
     // define a callback which is called when a payload is received

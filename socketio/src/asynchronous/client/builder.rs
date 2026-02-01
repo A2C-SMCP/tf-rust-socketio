@@ -1,11 +1,11 @@
 use futures_util::future::BoxFuture;
 use log::trace;
 use native_tls::TlsConnector;
+use std::collections::HashMap;
 use tf_rust_engineio::{
     asynchronous::ClientBuilder as EngineIoClientBuilder,
     header::{HeaderMap, HeaderValue},
 };
-use std::collections::HashMap;
 use url::Url;
 
 use crate::{error::Result, Event, Payload, TransportType};

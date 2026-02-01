@@ -90,7 +90,10 @@ impl From<String> for Payload {
 
 impl From<Vec<String>> for Payload {
     fn from(arr: Vec<String>) -> Self {
-        Self::Text(arr.into_iter().map(Payload::string_to_value).collect(), None)
+        Self::Text(
+            arr.into_iter().map(Payload::string_to_value).collect(),
+            None,
+        )
     }
 }
 
@@ -161,11 +164,14 @@ mod tests {
         ];
 
         assert_eq!(
-            Payload::Text(vec![
-                serde_json::Value::String(String::from("one")),
-                serde_json::Value::String(String::from("two")),
-                json!(["foo", "bar"])
-            ], None),
+            Payload::Text(
+                vec![
+                    serde_json::Value::String(String::from("one")),
+                    serde_json::Value::String(String::from("two")),
+                    json!(["foo", "bar"])
+                ],
+                None
+            ),
             Payload::from(input)
         );
     }
@@ -174,7 +180,10 @@ mod tests {
     fn test_from_multiple_json() {
         let input = vec![json!({"foo": "bar"}), json!("foo"), json!(["foo", "bar"])];
 
-        assert_eq!(Payload::Text(input.clone(), None), Payload::from(input.clone()));
+        assert_eq!(
+            Payload::Text(input.clone(), None),
+            Payload::from(input.clone())
+        );
     }
 
     #[test]
@@ -208,9 +217,9 @@ mod tests {
     fn test_payload_with_ack_id() {
         let payload = Payload::from("test");
         let payload_with_ack = Payload::with_ack_id(payload, 123);
-        
+
         assert_eq!(payload_with_ack.ack_id(), Some(123));
-        
+
         match payload_with_ack {
             Payload::Text(data, Some(ack_id)) => {
                 assert_eq!(data, vec![serde_json::Value::String("test".to_string())]);
@@ -224,10 +233,10 @@ mod tests {
     fn test_payload_set_ack_id() {
         let mut payload = Payload::from(vec![1, 2, 3]);
         assert_eq!(payload.ack_id(), None);
-        
+
         payload.set_ack_id(Some(456));
         assert_eq!(payload.ack_id(), Some(456));
-        
+
         payload.set_ack_id(None);
         assert_eq!(payload.ack_id(), None);
     }
@@ -235,14 +244,14 @@ mod tests {
     #[test]
     fn test_payload_data() {
         let payload = Payload::with_ack_id(json!("test"), 789);
-        
+
         match payload.data() {
             PayloadData::Text(data) => {
                 assert_eq!(data, &vec![json!("test")]);
             }
             _ => panic!("Expected Text data"),
         }
-        
+
         // Original payload still has ack_id
         assert_eq!(payload.ack_id(), Some(789));
     }

@@ -1,10 +1,10 @@
 use futures_util::FutureExt;
+use serde_json::json;
+use std::time::Duration;
 use tf_rust_socketio::{
     asynchronous::{Client, ClientBuilder},
     Payload,
 };
-use serde_json::json;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() {

@@ -1,8 +1,8 @@
 use native_tls::Certificate;
 use native_tls::TlsConnector;
-use tf_rust_socketio::ClientBuilder;
 use std::fs::File;
 use std::io::Read;
+use tf_rust_socketio::ClientBuilder;
 
 fn main() {
     // In case a trusted CA is needed that isn't in the trust chain.

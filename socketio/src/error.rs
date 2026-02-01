@@ -58,7 +58,7 @@ impl<T> From<std::sync::PoisonError<T>> for Error {
 
 impl From<Error> for std::io::Error {
     fn from(err: Error) -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::Other, err)
+        std::io::Error::other(err)
     }
 }
 

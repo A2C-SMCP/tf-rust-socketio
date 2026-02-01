@@ -7,9 +7,6 @@ use crate::{
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use tf_rust_engineio::{
-    asynchronous::Client as EngineClient, Packet as EnginePacket, PacketId as EnginePacketId,
-};
 use std::{
     fmt::Debug,
     pin::Pin,
@@ -17,6 +14,9 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+};
+use tf_rust_engineio::{
+    asynchronous::Client as EngineClient, Packet as EnginePacket, PacketId as EnginePacketId,
 };
 
 #[derive(Clone)]

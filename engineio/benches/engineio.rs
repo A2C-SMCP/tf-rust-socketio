@@ -1,9 +1,9 @@
 use criterion::{criterion_group, criterion_main};
 use native_tls::Certificate;
 use native_tls::TlsConnector;
-use tf_rust_engineio::error::Error;
 use std::fs::File;
 use std::io::Read;
+use tf_rust_engineio::error::Error;
 use url::Url;
 
 pub use criterion_wrappers::*;

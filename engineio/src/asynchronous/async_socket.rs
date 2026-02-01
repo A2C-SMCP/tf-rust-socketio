@@ -211,11 +211,7 @@ impl Socket {
         match Instant::now().checked_duration_since(*self.last_ping.lock().await) {
             Some(since_last_ping) => {
                 let since_last_ping = since_last_ping.as_millis() as u64;
-                if since_last_ping > self.max_ping_timeout {
-                    0
-                } else {
-                    self.max_ping_timeout - since_last_ping
-                }
+                self.max_ping_timeout.saturating_sub(since_last_ping)
             }
             None => 0,
         }

@@ -34,10 +34,10 @@ impl Packet {
     /// Returns a packet for a payload, could be used for both binary and non binary
     /// events and acks. Convenience method.
     #[inline]
-    pub(crate) fn new_from_payload<'a>(
+    pub(crate) fn new_from_payload(
         payload: Payload,
         event: Event,
-        nsp: &'a str,
+        nsp: &str,
         id: Option<i32>,
     ) -> Result<Packet> {
         match payload {
@@ -90,9 +90,9 @@ impl Packet {
     }
 
     #[inline]
-    pub(crate) fn ack_from_payload<'a>(
+    pub(crate) fn ack_from_payload(
         payload: Payload,
-        nsp: &'a str,
+        nsp: &str,
         ack_id: Option<i32>,
     ) -> Result<Packet> {
         match payload {
@@ -263,7 +263,7 @@ impl TryFrom<&Bytes> for Packet {
     /// this member. This is done because the attachment is usually
     /// send in another packet.
     fn try_from(payload: &Bytes) -> Result<Packet> {
-        let mut payload = str_from_utf8(&payload).map_err(Error::InvalidUtf8)?;
+        let mut payload = str_from_utf8(payload).map_err(Error::InvalidUtf8)?;
         let mut packet = Packet::default();
 
         // packet_type
@@ -700,10 +700,13 @@ mod test {
 
     #[test]
     fn new_from_payload_json() {
-        let payload = Payload::Text(vec![
-            serde_json::json!("String test"),
-            serde_json::json!({"type":"object"}),
-        ], None);
+        let payload = Payload::Text(
+            vec![
+                serde_json::json!("String test"),
+                serde_json::json!({"type":"object"}),
+            ],
+            None,
+        );
         let result =
             Packet::new_from_payload(payload.clone(), "third_event".into(), "/", Some(10)).unwrap();
         assert_eq!(
@@ -757,10 +760,13 @@ mod test {
 
     #[test]
     fn ack_from_payload_json() {
-        let payload = Payload::Text(vec![
-            serde_json::json!("String test"),
-            serde_json::json!({"type":"object"}),
-        ], None);
+        let payload = Payload::Text(
+            vec![
+                serde_json::json!("String test"),
+                serde_json::json!({"type":"object"}),
+            ],
+            None,
+        );
         let result = Packet::ack_from_payload(payload.clone(), "/", Some(10)).unwrap();
         assert_eq!(
             result,

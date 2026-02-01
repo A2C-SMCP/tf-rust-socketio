@@ -167,6 +167,9 @@ async fn main() {
 #![warn(clippy::style)]
 #![warn(clippy::perf)]
 #![warn(clippy::correctness)]
+// Allow large error types - Error enum contains rich context from engineio
+// which is intentional for debugging. Boxing would add indirection overhead.
+#![allow(clippy::result_large_err)]
 
 /// Defines client only structs
 pub mod client;
@@ -178,7 +181,7 @@ pub(crate) mod packet;
 /// Defines the types of payload (binary or string), that
 /// could be sent or received.
 pub mod payload;
-pub(self) mod socket;
+mod socket;
 
 /// Deprecated import since 0.3.0-alpha-2, use Error in the crate root instead.
 /// Contains the error type which will be returned with every result in this

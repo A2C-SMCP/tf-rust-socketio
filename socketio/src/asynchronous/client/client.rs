@@ -4,8 +4,8 @@ use backoff::{backoff::Backoff, ExponentialBackoffBuilder};
 use futures_util::{future::BoxFuture, stream, Stream, StreamExt};
 use log::{error, trace};
 use rand::{thread_rng, Rng};
-use tf_rust_engineio::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
+use tf_rust_engineio::header::{HeaderMap, HeaderValue};
 use tokio::{
     sync::RwLock,
     time::{sleep, Duration, Instant},
@@ -69,7 +69,7 @@ impl ReconnectSettings {
         val: T,
     ) -> &mut Self {
         self.headers
-            .get_or_insert_with(|| HeaderMap::default())
+            .get_or_insert_with(HeaderMap::default)
             .insert(key.into(), val.into());
         self
     }
@@ -487,7 +487,12 @@ impl Client {
         self.socket.read().await.send(socket_packet).await
     }
 
-    async fn callback<P: Into<Payload>>(&self, event: &Event, payload: P, ack_id: Option<i32>) -> Result<()> {
+    async fn callback<P: Into<Payload>>(
+        &self,
+        event: &Event,
+        payload: P,
+        ack_id: Option<i32>,
+    ) -> Result<()> {
         let mut builder = self.builder.write().await;
         let mut payload = payload.into();
         payload.set_ack_id(ack_id);
@@ -522,20 +527,12 @@ impl Client {
                         if let Some(ref payload) = socket_packet.data {
                             let mut payload = Payload::from(payload.to_owned());
                             payload.set_ack_id(socket_packet.id);
-                            ack.callback.deref_mut()(
-                                payload,
-                                self.clone(),
-                            )
-                            .await;
+                            ack.callback.deref_mut()(payload, self.clone()).await;
                         }
                         if let Some(ref attachments) = socket_packet.attachments {
-                            if let Some(payload) = attachments.get(0) {
+                            if let Some(payload) = attachments.first() {
                                 let payload = Payload::Binary(payload.to_owned(), socket_packet.id);
-                                ack.callback.deref_mut()(
-                                    payload,
-                                    self.clone(),
-                                )
-                                .await;
+                                ack.callback.deref_mut()(payload, self.clone()).await;
                             }
                         }
                     } else {
@@ -560,8 +557,13 @@ impl Client {
         };
 
         if let Some(attachments) = &packet.attachments {
-            if let Some(binary_payload) = attachments.get(0) {
-                self.callback(&event, Payload::Binary(binary_payload.to_owned(), packet.id), packet.id).await?;
+            if let Some(binary_payload) = attachments.first() {
+                self.callback(
+                    &event,
+                    Payload::Binary(binary_payload.to_owned(), packet.id),
+                    packet.id,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -624,8 +626,12 @@ impl Client {
                 }
                 PacketId::Disconnect => {
                     *(self.disconnect_reason.write().await) = DisconnectReason::Server;
-                    self.callback(&Event::Close, CloseReason::IOServerDisconnect.as_str(), None)
-                        .await?;
+                    self.callback(
+                        &Event::Close,
+                        CloseReason::IOServerDisconnect.as_str(),
+                        None,
+                    )
+                    .await?;
                 }
                 PacketId::ConnectError => {
                     self.callback(
@@ -635,7 +641,7 @@ impl Client {
                                 .data
                                 .as_ref()
                                 .unwrap_or(&String::from("\"No error message provided\"")),
-                        None
+                        None,
                     )
                     .await?;
                 }

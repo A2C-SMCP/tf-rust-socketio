@@ -69,6 +69,9 @@
 #![warn(clippy::style)]
 #![warn(clippy::perf)]
 #![warn(clippy::correctness)]
+// Allow large error types - Error enum contains rich context (HTTP responses, URLs, etc.)
+// which is intentional for debugging. Boxing would add indirection overhead.
+#![allow(clippy::result_large_err)]
 /// A small macro that spawns a scoped thread. Used for calling the callback
 /// functions.
 macro_rules! spawn_scoped {
@@ -85,7 +88,7 @@ pub mod client;
 /// Generic header map
 pub mod header;
 pub mod packet;
-pub(self) mod socket;
+mod socket;
 pub mod transport;
 pub mod transports;
 

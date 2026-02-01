@@ -211,7 +211,11 @@ impl RawClient {
         let _ = self.socket.send(disconnect_packet);
         self.socket.disconnect()?;
 
-        let _ = self.callback(&Event::Close, CloseReason::IOClientDisconnect.as_str(), None); // trigger on_close
+        let _ = self.callback(
+            &Event::Close,
+            CloseReason::IOClientDisconnect.as_str(),
+            None,
+        ); // trigger on_close
         Ok(())
     }
 
@@ -309,7 +313,12 @@ impl RawClient {
         Iter { socket: self }
     }
 
-    fn callback<P: Into<Payload>>(&self, event: &Event, payload: P, ack_id: Option<i32>) -> Result<()> {
+    fn callback<P: Into<Payload>>(
+        &self,
+        event: &Event,
+        payload: P,
+        ack_id: Option<i32>,
+    ) -> Result<()> {
         let mut on = self.on.lock()?;
         let mut on_any = self.on_any.lock()?;
         let lock = on.deref_mut();
@@ -383,7 +392,11 @@ impl RawClient {
 
         if let Some(attachments) = &packet.attachments {
             if let Some(binary_payload) = attachments.first() {
-                self.callback(&event, Payload::Binary(binary_payload.to_owned(), packet.id), packet.id)?;
+                self.callback(
+                    &event,
+                    Payload::Binary(binary_payload.to_owned(), packet.id),
+                    packet.id,
+                )?;
             }
         }
         Ok(())
@@ -443,7 +456,11 @@ impl RawClient {
                     self.callback(&Event::Connect, "", None)?;
                 }
                 PacketId::Disconnect => {
-                    self.callback(&Event::Close, CloseReason::IOServerDisconnect.as_str(), None)?;
+                    self.callback(
+                        &Event::Close,
+                        CloseReason::IOServerDisconnect.as_str(),
+                        None,
+                    )?;
                 }
                 PacketId::ConnectError => {
                     self.callback(
@@ -453,7 +470,7 @@ impl RawClient {
                                 .clone()
                                 .data
                                 .unwrap_or_else(|| String::from("\"No error message provided\"")),
-                        None
+                        None,
                     )?;
                 }
                 PacketId::Event => {
