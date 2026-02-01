@@ -1,3 +1,13 @@
 [workspace]
 members = ["engineio", "socketio"]
 resolver = "2"
+
+# cargo-workspaces 配置
+# 文档: https://github.com/pksunkara/cargo-workspaces
+[workspace.metadata.workspaces]
+# 允许在 main 分支上发布版本
+allow_branch = "main"
+# 不使用独立的 crate tag（如 tf-rust-engineio@0.6.1）
+independent = false
+# 版本 commit 消息格式
+version_message = "chore(release): bump version to %v"

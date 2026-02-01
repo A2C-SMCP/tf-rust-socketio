@@ -1,8 +1,8 @@
-name: Build and code style
+name: Build and Lint
 
 on:
   push:
-    branches: [main, refactoring]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -11,33 +11,25 @@ env:
 
 jobs:
   build:
+    name: Build & Code Quality
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - name: Setup rust environment
-        uses: actions-rs/toolchain@v1
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
+          components: rustfmt, clippy
 
-      - name: Generate Cargo.lock
-        run: cargo generate-lockfile
-
-      - uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --verbose --all-features
-      - name: Linting
-        run: cargo clippy --verbose --all-features
+
+      - name: Clippy
+        run: cargo clippy --verbose --all-features -- -D warnings
+
       - name: Check formatting
         run: cargo fmt --all -- --check

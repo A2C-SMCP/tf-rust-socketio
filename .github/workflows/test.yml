@@ -4,49 +4,46 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, refactoring]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  test:
+    name: Full Test Suite
     runs-on: ubuntu-latest
 
     steps:
-      - name: checkout
-        uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Setup rust environment  
-        uses: actions-rs/toolchain@v1
-        with:
-             profile: minimal
-             toolchain: stable
-             override: true
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup docker
-        id: buildx
-        uses: docker/setup-buildx-action@v1
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: Generate keys
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate TLS keys
         run: make keys
 
-      - name: Build docker container
+      - name: Build and start test server
         run: |
           cd ci && docker build -t test_suite:latest .
-          docker run -d -p 4200:4200 -p 4201:4201 -p 4202:4202 -p 4203:4203 -p 4204:4204 -p 4205:4205 -p 4206:4206 test_suite:latest
+          docker run -d --name socketio_test \
+            -p 4200:4200 -p 4201:4201 -p 4202:4202 \
+            -p 4203:4203 -p 4204:4204 -p 4205:4205 -p 4206:4206 \
+            test_suite:latest
 
-      - name: Generate Cargo.lock
-        run: cargo generate-lockfile
+      - name: Wait for server
+        run: sleep 5
 
-      - uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run tests
+        run: cargo test --verbose --all-features
 
-      - name: Run testsuite
-        run: cargo test --verbose --features "async"
+      - name: Stop test server
+        if: always()
+        run: docker stop socketio_test || true

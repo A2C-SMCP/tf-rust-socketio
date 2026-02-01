@@ -1,25 +1,61 @@
-name: Publish
+name: Publish to crates.io
 
 on:
-  workflow_dispatch
+  release:
+    types: [published]
+  # 保留手动触发作为备用
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  # 发布前先验证
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-features -- -D warnings
+
+      - name: Dry-run publish (engineio)
+        run: cargo publish --dry-run -p tf-rust-engineio
+
+      - name: Dry-run publish (socketio)
+        run: cargo publish --dry-run -p tf-rust-socketio
+
   publish:
     name: Publish
     runs-on: ubuntu-latest
+    needs: validate
+    environment: crates-io
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-            toolchain: stable
-            override: true
-      # Publish the engine.io crate
-      - uses: katyo/publish-crates@v1
-        with:
-            path: './engineio'
-            registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      # Publish the socket.io crate
-      - uses: katyo/publish-crates@v1
-        with:
-            path: './socketio'
-            registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # 按依赖顺序发布：先 engineio，后 socketio
+      - name: Publish engineio
+        run: cargo publish -p tf-rust-engineio --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # 等待 crates.io 索引更新
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish socketio
+        run: cargo publish -p tf-rust-socketio --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
