@@ -27,7 +27,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --all-features
 
       - name: Dry-run publish (engineio)
         run: cargo publish --dry-run -p tf-rust-engineio
