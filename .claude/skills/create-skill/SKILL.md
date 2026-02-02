@@ -10,8 +10,11 @@ description: Creates new Claude Skills with proper structure, SKILL.md templates
 ## 重点
 
 ### 能引用当前现成的代码示例的，就不要在SKILL中摘录，而是直接使用 Markdown 链接到文件，代码胜于文档
+
 ### SKILL 最重要的是阐述模式与概念及最佳实践，首先要讲清为何如此来做，其次介绍最佳实践，至于如何操作的具体步骤，参考上述表达，引用示例文件即可
+
 ### 如果待创建的 SKILL 在当前项目中尚无示例文档，那说明这个SKILL尚未经过当前项目实践验证，它不具备独立成为SKILL的必要条件，应该拒绝创建
+
 ### SKILL 主体内容应该是分步描述当前这个 SKILL 如何执行，在每一步可以参考哪些文件，输出结果应该是什么样子。如此一来，模式的表达自然会渗透其中，而不是一味地堆砌参考，导致文档臃肿，空而无物，华而不实。
 
 ## Quick start
@@ -110,7 +113,9 @@ skill-data-process  # 不要前缀 "skill-"
 
 使用示例：
 \```python
+
 # Tool reference format: ServerName:tool_name
+
 result = filesystem:read_file(path="config.json")
 \```
 ```
@@ -135,19 +140,24 @@ EOF
 ### 内容组织（渐进式披露）
 
 ```markdown
-## Quick start        # 80% 的常见用例
-## Basic usage        # 标准用法
-## Advanced usage     # 复杂场景
-## Edge cases         # 边缘情况
+## Quick start # 80% 的常见用例
+
+## Basic usage # 标准用法
+
+## Advanced usage # 复杂场景
+
+## Edge cases # 边缘情况
 ```
 
 ### 路径引用规范
 
 ```markdown
 # ✅ 正确：使用正斜杠和 {baseDir}
+
 path: "{baseDir}/resources/config.json"
 
 # ❌ 错误：Windows 风格反斜杠
+
 path: "resources\\config.json"
 ```
 
@@ -162,6 +172,7 @@ path: "resources\\config.json"
 - **混合环境**：可以同时提供中英文描述（英文在前，中文在后）
 
 **为什么这样要求？**
+
 - Claude Code 会根据 description 匹配和调用 Skill
 - 使用与用户交互语言一致的 description 可以提高匹配准确度
 - 母语描述更容易让用户理解 Skill 的功能和使用场景
@@ -190,12 +201,12 @@ data-tool          # 太宽泛，混合多种功能
 
 ## 常见错误
 
-| 错误 | 解决方案 |
-|------|---------|
-| `Invalid YAML frontmatter` | 确保 `---` 包围 YAML 块 |
-| `name exceeds 64 chars` | 缩短 name 字段 |
-| `Skill not found` | 检查目录结构：`.claude/skills/your-skill/SKILL.md` |
-| `Resources not loading` | 使用 `{baseDir}` 变量和正斜杠 |
+| 错误                         | 解决方案                                        |
+|----------------------------|---------------------------------------------|
+| `Invalid YAML frontmatter` | 确保 `---` 包围 YAML 块                          |
+| `name exceeds 64 chars`    | 缩短 name 字段                                  |
+| `Skill not found`          | 检查目录结构：`.claude/skills/your-skill/SKILL.md` |
+| `Resources not loading`    | 使用 `{baseDir}` 变量和正斜杠                       |
 
 ## 验证清单
 
