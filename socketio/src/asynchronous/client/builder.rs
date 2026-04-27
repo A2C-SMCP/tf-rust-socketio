@@ -472,3 +472,73 @@ impl ClientBuilder {
         Ok(socket)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::error::Error;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use tf_rust_engineio::Error as EngineError;
+
+    /// Spawns a one-shot HTTP server that always replies with the given status
+    /// and body. Mirrors the engineio test helper, kept local because the
+    /// engineio version is `pub(crate)` to that crate.
+    fn spawn_http_error_mock(status: u16, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status} ERR\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+                    status = status,
+                    len = body.len(),
+                    body = body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        format!("http://127.0.0.1:{}/", port)
+    }
+
+    /// Verifies that when the server rejects the Engine.IO handshake with an
+    /// HTTP error + JSON body (e.g. an A2C-SMCP protocol-version mismatch
+    /// returning 400 + `{"code":4008,...}`), the body propagates all the way
+    /// out of `ClientBuilder::connect()` so downstream callers can match on
+    /// the structured error.
+    #[tokio::test]
+    async fn connect_surfaces_http_error_body_through_socketio_error() {
+        let body = r#"{"code":4008,"message":"Protocol version mismatch"}"#;
+        let url = spawn_http_error_mock(400, body);
+
+        let result = ClientBuilder::new(url)
+            .transport_type(TransportType::Polling)
+            .connect()
+            .await;
+
+        let err = match result {
+            Ok(_) => panic!("connect should fail when handshake server returns 400"),
+            Err(e) => e,
+        };
+
+        match err {
+            Error::IncompleteResponseFromEngineIo(EngineError::HttpErrorWithBody {
+                status,
+                body: got,
+            }) => {
+                assert_eq!(status, 400);
+                assert_eq!(got, body);
+            }
+            other => {
+                panic!("expected IncompleteResponseFromEngineIo(HttpErrorWithBody), got: {other:?}")
+            }
+        }
+    }
+}

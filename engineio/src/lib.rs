@@ -147,4 +147,36 @@ pub(crate) mod test {
             .unwrap_or_else(|_| SERVER_URL_SECURE.to_owned());
         Ok(Url::parse(&url)?)
     }
+
+    /// Spawns a minimal one-shot HTTP server on a random local port that always
+    /// replies with the given status code and body. Used for verifying that the
+    /// polling transport surfaces server-side error bodies via
+    /// [`crate::Error::HttpErrorWithBody`]. Accepts a small number of
+    /// connections so a single test can drive both GET and POST paths.
+    pub(crate) fn spawn_http_error_mock(status: u16, body: &'static str) -> Url {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status} ERR\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+                    status = status,
+                    len = body.len(),
+                    body = body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        Url::parse(&format!("http://127.0.0.1:{}/", port)).unwrap()
+    }
 }

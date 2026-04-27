@@ -34,6 +34,8 @@ pub enum Error {
     WebsocketError(#[from] TungsteniteError),
     #[error("Network request returned with status code: {0}")]
     IncompleteHttp(u16),
+    #[error("Network request returned with status code {status}, body: {body}")]
+    HttpErrorWithBody { status: u16, body: String },
     #[error("Got illegal handshake response: {0}")]
     InvalidHandshake(String),
     #[error("Called an action before the connection was established")]

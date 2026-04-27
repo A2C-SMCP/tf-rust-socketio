@@ -66,9 +66,21 @@ impl PollingTransport {
         try_stream! {
             let address = Self::address(url);
 
-            yield client
+            let response = client
                 .get(address?)
-                .send().await?
+                .send().await?;
+
+            let status = response.status().as_u16();
+            if status != 200 {
+                let err = match response.text().await {
+                    Ok(body) => Error::HttpErrorWithBody { status, body },
+                    Err(_) => Error::IncompleteHttp(status),
+                };
+                Err(err)?;
+                unreachable!();
+            }
+
+            yield response
         }
     }
 
@@ -115,18 +127,19 @@ impl AsyncTransport for PollingTransport {
             data
         };
 
-        let status = self
+        let response = self
             .client
             .post(self.address().await?)
             .body(data_to_send)
             .send()
-            .await?
-            .status()
-            .as_u16();
+            .await?;
 
+        let status = response.status().as_u16();
         if status != 200 {
-            let error = Error::IncompleteHttp(status);
-            return Err(error);
+            return Err(match response.text().await {
+                Ok(body) => Error::HttpErrorWithBody { status, body },
+                Err(_) => Error::IncompleteHttp(status),
+            });
         }
 
         Ok(())
@@ -163,7 +176,50 @@ mod test {
     use crate::asynchronous::transport::AsyncTransport;
 
     use super::*;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
     use std::str::FromStr;
+
+    #[tokio::test]
+    async fn polling_transport_emit_returns_http_error_with_body() {
+        let body = r#"{"code":4008,"message":"Protocol version mismatch"}"#;
+        let url = crate::test::spawn_http_error_mock(400, body);
+        let transport = PollingTransport::new(url, None, None);
+
+        let err = transport
+            .emit(Bytes::from_static(b"hello"), false)
+            .await
+            .expect_err("emit should fail when server returns 400");
+
+        match err {
+            Error::HttpErrorWithBody { status, body: got } => {
+                assert_eq!(status, 400);
+                assert_eq!(got, body);
+            }
+            other => panic!("expected HttpErrorWithBody, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn polling_transport_get_returns_http_error_with_body() {
+        let body = r#"{"code":4008,"message":"Protocol version mismatch"}"#;
+        let url = crate::test::spawn_http_error_mock(400, body);
+        let mut transport = PollingTransport::new(url, None, None);
+
+        let err = transport
+            .next()
+            .await
+            .expect("stream should yield an item")
+            .expect_err("GET should fail when server returns 400");
+
+        match err {
+            Error::HttpErrorWithBody { status, body: got } => {
+                assert_eq!(status, 400);
+                assert_eq!(got, body);
+            }
+            other => panic!("expected HttpErrorWithBody, got: {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn polling_transport_base_url() -> Result<()> {

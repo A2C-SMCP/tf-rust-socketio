@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog], and this project adheres to
 ## Overview
 
 * [unreleased](#unreleased)
+* [`0.8.0`](#080) - _2026.04.27_
+* [`0.7.0`](#070) - _2026.02.01_
 * [`0.5.0`](#060) - _2024.04.16_
 * [`0.5.0`](#050) - _2024.03.31_
 * [`0.4.4`](#044) - _2023.11.18_
@@ -35,6 +37,36 @@ The format is based on [Keep a Changelog], and this project adheres to
 * [`0.1.0`](#010) – _2021.01.05_
 
 ## _[Unreleased]_
+
+## <a name="080">[0.8.0] - _Preserve HTTP error body on Engine.IO handshake failure_ </a>
+
+_2026.04.27_
+
+### Added
+- New error variant `tf_rust_engineio::Error::HttpErrorWithBody { status, body }`. The polling
+  transport now preserves the response body when the server returns a non-200 status (e.g. an
+  HTTP 400 + JSON payload from a Socket.IO middleware), so callers can match on structured
+  server-side errors instead of only seeing a status code
+  ([#7](https://github.com/A2C-SMCP/tf-rust-socketio/issues/7)).
+- The new variant transparently propagates through `tf_rust_socketio::Error::IncompleteResponseFromEngineIo`,
+  letting Socket.IO clients decode JSON bodies returned during handshake failures.
+
+### Changed
+- Sync and async `PollingTransport` (`emit` POST + GET) now read the response body on non-200
+  responses and emit `HttpErrorWithBody`. If the body cannot be read (e.g. a truncated stream),
+  the transports fall back to the existing `Error::IncompleteHttp(status)` so callers always
+  observe one of the two variants — no information is silently dropped.
+
+### Compatibility
+- `Error::IncompleteHttp(u16)` is retained as the body-unavailable fallback. Existing downstream
+  `match` arms keep compiling and stay reachable.
+- Both `engineio::Error` and `socketio::Error` are `#[non_exhaustive]`, so adding the new
+  variant is additive at the type level. Behavior change is opt-in: callers that do not pattern
+  match on `HttpErrorWithBody` keep observing it via the existing `Display`/`Debug` formatting.
+
+## <a name="070">[0.7.0] - _Concurrent ACK support_ </a>
+
+_2026.02.01_
 
 ### Breaking Changes
 - **Payload enum variants now include an optional `ack_id` field** to support concurrent acknowledgments

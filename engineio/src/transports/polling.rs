@@ -62,29 +62,35 @@ impl Transport for PollingTransport {
         } else {
             data
         };
-        let status = self
+        let response = self
             .client
             .post(self.address()?)
             .body(data_to_send)
-            .send()?
-            .status()
-            .as_u16();
+            .send()?;
 
+        let status = response.status().as_u16();
         if status != 200 {
-            let error = Error::IncompleteHttp(status);
-            return Err(error);
+            return Err(match response.text() {
+                Ok(body) => Error::HttpErrorWithBody { status, body },
+                Err(_) => Error::IncompleteHttp(status),
+            });
         }
 
         Ok(())
     }
 
     fn poll(&self, timeout: Duration) -> Result<Bytes> {
-        Ok(self
-            .client
-            .get(self.address()?)
-            .timeout(timeout)
-            .send()?
-            .bytes()?)
+        let response = self.client.get(self.address()?).timeout(timeout).send()?;
+
+        let status = response.status().as_u16();
+        if status != 200 {
+            return Err(match response.text() {
+                Ok(body) => Error::HttpErrorWithBody { status, body },
+                Err(_) => Error::IncompleteHttp(status),
+            });
+        }
+
+        Ok(response.bytes()?)
     }
 
     fn base_url(&self) -> Result<Url> {
@@ -108,6 +114,45 @@ impl Transport for PollingTransport {
 mod test {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn polling_transport_emit_returns_http_error_with_body() {
+        let body = r#"{"code":4008,"message":"Protocol version mismatch"}"#;
+        let url = crate::test::spawn_http_error_mock(400, body);
+        let transport = PollingTransport::new(url, None, None);
+
+        let err = transport
+            .emit(Bytes::from_static(b"hello"), false)
+            .expect_err("emit should fail when server returns 400");
+
+        match err {
+            Error::HttpErrorWithBody { status, body: got } => {
+                assert_eq!(status, 400);
+                assert_eq!(got, body);
+            }
+            other => panic!("expected HttpErrorWithBody, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn polling_transport_poll_returns_http_error_with_body() {
+        let body = r#"{"code":4008,"message":"Protocol version mismatch"}"#;
+        let url = crate::test::spawn_http_error_mock(400, body);
+        let transport = PollingTransport::new(url, None, None);
+
+        let err = transport
+            .poll(Duration::from_secs(2))
+            .expect_err("poll should fail when server returns 400");
+
+        match err {
+            Error::HttpErrorWithBody { status, body: got } => {
+                assert_eq!(status, 400);
+                assert_eq!(got, body);
+            }
+            other => panic!("expected HttpErrorWithBody, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn polling_transport_base_url() -> Result<()> {
         let url = crate::test::engine_io_server()?.to_string();
