@@ -36,6 +36,8 @@ pub enum Error {
     IncompleteHttp(u16),
     #[error("Network request returned with status code {status}, body: {body}")]
     HttpErrorWithBody { status: u16, body: String },
+    #[error("Websocket closed with code {code}: {reason}")]
+    WebsocketClosed { code: u16, reason: String },
     #[error("Got illegal handshake response: {0}")]
     InvalidHandshake(String),
     #[error("Called an action before the connection was established")]
