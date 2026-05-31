@@ -54,7 +54,9 @@ impl Transport for WebsocketTransport {
             };
             match r {
                 Ok(b) => b.ok_or(Error::IncompletePacket()),
-                Err(_) => Err(Error::IncompletePacket()),
+                // propagate the real transport error (e.g. `WebsocketClosed`)
+                // instead of masking it, so the close code is not lost
+                Err(e) => Err(e),
             }
         })
     }

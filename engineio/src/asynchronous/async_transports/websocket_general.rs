@@ -14,6 +14,19 @@ use tungstenite::Message;
 type AsyncWebsocketSender = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 type AsyncWebsocketReceiver = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
+/// Converts a websocket close frame into the corresponding
+/// [`Error::WebsocketClosed`], preserving the numeric close code (incl. the
+/// RFC6455 private range 4000-4999). A close without a frame maps to code 1005
+/// ("no status received") per RFC6455 convention.
+fn close_frame_to_error(
+    close_frame: Option<tungstenite::protocol::frame::CloseFrame<'_>>,
+) -> Error {
+    let (code, reason) = close_frame
+        .map(|frame| (u16::from(frame.code), frame.reason.into_owned()))
+        .unwrap_or((1005, String::new()));
+    Error::WebsocketClosed { code, reason }
+}
+
 /// A general purpose asynchronous websocket transport type. Holds
 /// the sender and receiver stream of a websocket connection
 /// and implements the common methods `update` and `emit`. This also
@@ -36,7 +49,14 @@ impl AsyncWebsocketGeneralTransport {
     }
 
     /// Sends probe packet to ensure connection is valid, then sends upgrade
-    /// request
+    /// request.
+    ///
+    /// NOTE: this is the polling→websocket upgrade path. If the server closes
+    /// the connection during the probe (e.g. with close code 4900), the close
+    /// frame fails the pong-probe comparison and is reported as
+    /// `Error::InvalidPacket` — the numeric close code is NOT surfaced here.
+    /// The close code is preserved on the read paths (`poll_next` / `Stream`);
+    /// closing the upgrade gap is tracked as a follow-up.
     pub(crate) async fn upgrade(&self) -> Result<()> {
         let mut receiver = self.receiver.lock().await;
         let mut sender = self.sender.lock().await;
@@ -92,7 +112,13 @@ impl AsyncWebsocketGeneralTransport {
 
                     return Ok(Some(msg.freeze()));
                 }
-                // ignore packets other than text and binary
+                // capture websocket close frames so the numeric close code
+                // (incl. the RFC6455 private range 4000-4999) is surfaced to
+                // consumers instead of being silently dropped
+                Some(Ok(Message::Close(close_frame))) => {
+                    return Err(close_frame_to_error(close_frame))
+                }
+                // ignore packets other than text, binary and close (e.g. ping/pong)
                 Some(Ok(_)) => (),
                 Some(Err(err)) => return Err(err.into()),
                 None => return Ok(None),
@@ -121,7 +147,13 @@ impl Stream for AsyncWebsocketGeneralTransport {
 
                     return Poll::Ready(Some(Ok(msg.freeze())));
                 }
-                // ignore packets other than text and binary
+                // capture websocket close frames so the numeric close code
+                // (incl. the RFC6455 private range 4000-4999) is surfaced to
+                // consumers instead of being silently dropped
+                Some(Ok(Message::Close(close_frame))) => {
+                    return Poll::Ready(Some(Err(close_frame_to_error(close_frame))))
+                }
+                // ignore packets other than text, binary and close (e.g. ping/pong)
                 Some(Ok(_)) => (),
                 Some(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
                 None => return Poll::Ready(None),

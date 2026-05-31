@@ -167,4 +167,98 @@ mod test {
         println!("{:?}", transport.next().await.unwrap());
         Ok(())
     }
+
+    /// Spawns a minimal in-process websocket server that accepts a single
+    /// connection, immediately closes it with the A2C-SMCP version-handshake
+    /// rejection close code (4900, RFC6455 private range) and keeps the socket
+    /// open until the client has read the frame. Returns the bound address.
+    async fn spawn_close_4900_server() -> std::net::SocketAddr {
+        use futures_util::SinkExt;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tungstenite::protocol::frame::{coding::CloseCode, CloseFrame};
+        use tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                if let Ok(mut ws) = accept_async(stream).await {
+                    let _ = ws
+                        .send(Message::Close(Some(CloseFrame {
+                            code: CloseCode::Library(4900),
+                            reason: "version handshake rejected".into(),
+                        })))
+                        .await;
+                    // keep the connection alive until the client has read the
+                    // close frame and disconnected
+                    while let Some(Ok(_)) = ws.next().await {}
+                }
+            }
+        });
+        addr
+    }
+
+    /// A close frame's numeric code (incl. the RFC6455 private range 4000-4999)
+    /// must be surfaced through `poll_next` rather than silently dropped.
+    #[tokio::test]
+    async fn websocket_close_code_surfaced_via_poll_next() -> Result<()> {
+        let addr = spawn_close_4900_server().await;
+        let url = Url::parse(&format!("ws://{}/engine.io/", addr))?;
+        let transport = WebsocketTransport::new(url, None).await?;
+
+        match transport.poll_next().await {
+            Err(crate::error::Error::WebsocketClosed { code, reason }) => {
+                assert_eq!(code, 4900);
+                assert_eq!(reason, "version handshake rejected");
+            }
+            other => panic!("expected Err(WebsocketClosed {{ code: 4900, .. }}), got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// When the server rejects a WS-only connection at the handshake phase by
+    /// closing with code 4900, the error must propagate out of
+    /// `build_websocket()` so consumers can read it from the `connect()` path.
+    #[tokio::test]
+    async fn websocket_close_code_surfaced_via_build_handshake() -> Result<()> {
+        use crate::asynchronous::ClientBuilder;
+
+        let addr = spawn_close_4900_server().await;
+        let url = Url::parse(&format!("ws://{}/", addr))?;
+
+        match ClientBuilder::new(url).build_websocket().await {
+            Err(crate::error::Error::WebsocketClosed { code, reason }) => {
+                assert_eq!(code, 4900);
+                assert_eq!(reason, "version handshake rejected");
+            }
+            Err(other) => {
+                panic!("expected WebsocketClosed {{ code: 4900, .. }}, got Err({other:?})")
+            }
+            Ok(_) => panic!("expected build_websocket to fail with WebsocketClosed {{ 4900 }}"),
+        }
+        Ok(())
+    }
+
+    /// The production async path drives the transport through its `Stream` impl
+    /// (`StreamExt::next`), not the inherent `poll_next`. Cover that branch
+    /// directly so the shared close-capture logic in
+    /// `AsyncWebsocketGeneralTransport` (reused by both ws and wss) is guarded.
+    #[tokio::test]
+    async fn websocket_close_code_surfaced_via_stream_impl() -> Result<()> {
+        let addr = spawn_close_4900_server().await;
+        let url = Url::parse(&format!("ws://{}/engine.io/", addr))?;
+        let mut transport = WebsocketTransport::new(url, None).await?;
+
+        match transport.next().await {
+            Some(Err(crate::error::Error::WebsocketClosed { code, reason })) => {
+                assert_eq!(code, 4900);
+                assert_eq!(reason, "version handshake rejected");
+            }
+            other => {
+                panic!("expected Some(Err(WebsocketClosed {{ code: 4900, .. }})), got {other:?}")
+            }
+        }
+        Ok(())
+    }
 }
