@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ## Overview
 
-* [unreleased](#unreleased)
+* [`0.9.0`](#090) - _2026.08.24_
 * [`0.8.0`](#080) - _2026.04.27_
 * [`0.7.0`](#070) - _2026.02.01_
 * [`0.5.0`](#060) - _2024.04.16_
@@ -36,7 +36,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 * [`0.1.1`](#011) – _2021.01.10_
 * [`0.1.0`](#010) – _2021.01.05_
 
-## _[Unreleased]_
+## <a name="090">[0.9.0] - _Async callback concurrent dispatch — reader never blocks on user callbacks_ </a>
+
+_2026.08.24_
 
 ### Breaking Changes
 - The asynchronous client (`ClientBuilder::on` / `ClientBuilder::on_any` / `Client::emit_with_ack`,
