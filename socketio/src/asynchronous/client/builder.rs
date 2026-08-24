@@ -1,7 +1,7 @@
 use futures_util::future::BoxFuture;
 use log::trace;
 use native_tls::TlsConnector;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tf_rust_engineio::{
     asynchronous::ClientBuilder as EngineIoClientBuilder,
     header::{HeaderMap, HeaderValue},
@@ -24,8 +24,10 @@ use crate::asynchronous::socket::Socket as InnerSocket;
 /// acts the `build` method and returns a connected [`Client`].
 pub struct ClientBuilder {
     pub(crate) address: String,
-    pub(crate) on: HashMap<Event, Callback<DynAsyncCallback>>,
-    pub(crate) on_any: Option<Callback<DynAsyncAnyCallback>>,
+    // Callbacks are Arc'd so `Client::callback` can clone them out of the
+    // builder lock and run them in spawned dispatch tasks (issue #12).
+    pub(crate) on: HashMap<Event, Arc<Callback<DynAsyncCallback>>>,
+    pub(crate) on_any: Option<Arc<Callback<DynAsyncAnyCallback>>>,
     pub(crate) on_reconnect: Option<Callback<DynAsyncReconnectSettingsCallback>>,
     pub(crate) namespace: String,
     tls_config: Option<TlsConnector>,
@@ -189,13 +191,12 @@ impl ClientBuilder {
     #[cfg(feature = "async-callbacks")]
     pub fn on<T: Into<Event>, F>(mut self, event: T, callback: F) -> Self
     where
-        F: for<'a> std::ops::FnMut(Payload, Client) -> BoxFuture<'static, ()>
-            + 'static
-            + Send
-            + Sync,
+        F: std::ops::Fn(Payload, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.on
-            .insert(event.into(), Callback::<DynAsyncCallback>::new(callback));
+        self.on.insert(
+            event.into(),
+            Arc::new(Callback::<DynAsyncCallback>::new(callback)),
+        );
         self
     }
 
@@ -227,10 +228,7 @@ impl ClientBuilder {
     /// ```
     pub fn on_reconnect<F>(mut self, callback: F) -> Self
     where
-        F: for<'a> std::ops::FnMut() -> BoxFuture<'static, ReconnectSettings>
-            + 'static
-            + Send
-            + Sync,
+        F: std::ops::FnMut() -> BoxFuture<'static, ReconnectSettings> + 'static + Send + Sync,
     {
         self.on_reconnect = Some(Callback::<DynAsyncReconnectSettingsCallback>::new(callback));
         self
@@ -261,9 +259,9 @@ impl ClientBuilder {
     /// ```
     pub fn on_any<F>(mut self, callback: F) -> Self
     where
-        F: for<'a> FnMut(Event, Payload, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync,
+        F: Fn(Event, Payload, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.on_any = Some(Callback::<DynAsyncAnyCallback>::new(callback));
+        self.on_any = Some(Arc::new(Callback::<DynAsyncAnyCallback>::new(callback)));
         self
     }
 

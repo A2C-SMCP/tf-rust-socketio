@@ -1,4 +1,4 @@
-use std::{ops::DerefMut, pin::Pin, sync::Arc};
+use std::{ops::Deref, pin::Pin, sync::Arc};
 
 use backoff::{backoff::Backoff, ExponentialBackoffBuilder};
 use futures_util::{future::BoxFuture, stream, Stream, StreamExt};
@@ -8,6 +8,7 @@ use serde_json::Value;
 use tf_rust_engineio::header::{HeaderMap, HeaderValue};
 use tokio::{
     sync::RwLock,
+    task::JoinHandle,
     time::{sleep, Duration, Instant},
 };
 
@@ -75,6 +76,10 @@ impl ReconnectSettings {
     }
 }
 
+/// An in-flight per-packet dispatch task plus whether it is a terminal
+/// notification (Close/Error of a dying session).
+type DispatchTask = (JoinHandle<()>, bool);
+
 /// A socket which handles communication with the server. It's initialized with
 /// a specific address as well as an optional namespace to connect to. If `None`
 /// is given the client will connect to the default namespace `"/"`.
@@ -89,6 +94,11 @@ pub struct Client {
     auth: Option<serde_json::Value>,
     builder: Arc<RwLock<ClientBuilder>>,
     disconnect_reason: Arc<RwLock<DisconnectReason>>,
+    // Tracks in-flight per-packet dispatch tasks (issue #12) so they can be
+    // aborted on teardown. `true` marks a task as terminal: terminal tasks
+    // (Close/Error notifications of a dead session) survive a stream-end
+    // abort but are cut by a manual disconnect.
+    dispatch_tasks: Arc<std::sync::Mutex<Vec<DispatchTask>>>,
 }
 
 impl Client {
@@ -104,6 +114,7 @@ impl Client {
             auth: builder.auth.clone(),
             builder: Arc::new(RwLock::new(builder)),
             disconnect_reason: Arc::new(RwLock::new(DisconnectReason::default())),
+            dispatch_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -187,13 +198,26 @@ impl Client {
                         // the closure yet. Hence, fire a transport close event to notify it.
                         // We don't need to do that in the other cases, since proper server close
                         // and manual client close are handled explicitly.
-                        if let Some(err) = client_clone
-                            .callback(&Event::Close, CloseReason::TransportClose.as_str(), None)
-                            .await
-                            .err()
-                        {
-                            error!("Error while notifying client of transport close: {err}")
-                        }
+                        // The callback is spawned as a terminal dispatch task so a
+                        // long Close handler cannot stall the reconnect decision
+                        // (issue #12).
+                        let close_client = client_clone.clone();
+                        client_clone.spawn_dispatch(
+                            async move {
+                                if let Some(err) = close_client
+                                    .callback(
+                                        &Event::Close,
+                                        CloseReason::TransportClose.as_str(),
+                                        None,
+                                    )
+                                    .await
+                                    .err()
+                                {
+                                    error!("Error while notifying client of transport close: {err}")
+                                }
+                            },
+                            true,
+                        );
 
                         reconnect
                     }
@@ -403,6 +427,15 @@ impl Client {
         self.socket.read().await.send(disconnect_packet).await?;
         self.socket.read().await.disconnect().await?;
 
+        // Abort all in-flight dispatch tasks (including terminal ones) after
+        // the teardown above: no user callback may fire late against the
+        // dead connection (issue #12). Aborts are fired last so a dispatch
+        // task that itself calls `disconnect()` has already sent the packet;
+        // it is then cancelled at its next await point. (Task IDs are not
+        // available on the pinned tokio 1.40, so per-caller exclusion is not
+        // possible; the ordering above makes it unnecessary.)
+        self.abort_dispatch(true);
+
         Ok(())
     }
 
@@ -463,10 +496,7 @@ impl Client {
         callback: F,
     ) -> Result<()>
     where
-        F: for<'a> std::ops::FnMut(Payload, Client) -> BoxFuture<'static, ()>
-            + 'static
-            + Send
-            + Sync,
+        F: std::ops::Fn(Payload, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync,
         E: Into<Event>,
         D: Into<Payload>,
     {
@@ -487,64 +517,123 @@ impl Client {
         self.socket.read().await.send(socket_packet).await
     }
 
+    /// Spawns a per-packet dispatch task and tracks it so it can be aborted on
+    /// teardown. `terminal` tasks (Close/Error notifications of a dying
+    /// session) survive a stream-end abort; a manual disconnect aborts them
+    /// too.
+    fn spawn_dispatch(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+        terminal: bool,
+    ) {
+        let handle = tokio::spawn(task);
+        let mut tasks = self.dispatch_tasks.lock().unwrap();
+        // Prune finished handles so the list only holds in-flight tasks.
+        tasks.retain(|(h, _)| !h.is_finished());
+        tasks.push((handle, terminal));
+    }
+
+    /// Aborts in-flight dispatch tasks, keeping terminal tasks unless
+    /// `include_terminal` is set. Callers must not hold any other lock while
+    /// calling this (it locks the dispatch list).
+    fn abort_dispatch(&self, include_terminal: bool) {
+        let mut tasks = self.dispatch_tasks.lock().unwrap();
+        let mut remaining = Vec::new();
+        for (handle, terminal) in tasks.drain(..) {
+            if include_terminal || !terminal {
+                handle.abort();
+            } else {
+                remaining.push((handle, terminal));
+            }
+        }
+        *tasks = remaining;
+    }
+
     async fn callback<P: Into<Payload>>(
         &self,
         event: &Event,
         payload: P,
         ack_id: Option<i32>,
     ) -> Result<()> {
-        let mut builder = self.builder.write().await;
-        let mut payload = payload.into();
-        payload.set_ack_id(ack_id);
+        let payload = {
+            let mut payload = payload.into();
+            payload.set_ack_id(ack_id);
+            payload
+        };
 
-        if let Some(callback) = builder.on.get_mut(event) {
+        // Only the callback registrations are cloned out of the builder lock
+        // (shared references — `Fn`, cheap Arc clones); user callbacks run
+        // outside the lock so a long callback cannot stall other dispatches
+        // (issue #12).
+        let (on_callback, on_any_callback) = {
+            let builder = self.builder.read().await;
+            let on_callback = builder.on.get(event).cloned();
+            let on_any_callback = match event {
+                Event::Message | Event::Custom(_) => builder.on_any.clone(),
+                _ => None,
+            };
+            (on_callback, on_any_callback)
+        };
+
+        if let Some(callback) = on_callback {
             callback(payload.clone(), self.clone()).await;
         }
 
         // Call on_any for all common and custom events.
-        match event {
-            Event::Message | Event::Custom(_) => {
-                if let Some(callback) = builder.on_any.as_mut() {
-                    callback(event.clone(), payload, self.clone()).await;
-                }
-            }
-            _ => (),
+        if let Some(callback) = on_any_callback {
+            callback(event.clone(), payload, self.clone()).await;
         }
 
         Ok(())
     }
 
-    /// Handles the incoming acks and classifies what callbacks to call and how.
+    /// Handles an incoming ack. Matching outstanding acks are taken out under
+    /// one short lock; the user callbacks run outside the lock so a slow ack
+    /// callback cannot stall the reader or other ack/event dispatch (issue #12).
+    /// Taking the acks out (draining) also fixes the stale-index removal bug of
+    /// the old implementation: with colliding ids the index-based removal
+    /// missed entries, leaking acks that later re-fired for the same id.
     #[inline]
-    async fn handle_ack(&self, socket_packet: &Packet) -> Result<()> {
-        let mut to_be_removed = Vec::new();
-        if let Some(id) = socket_packet.id {
-            for (index, ack) in self.outstanding_acks.write().await.iter_mut().enumerate() {
-                if ack.id == id {
-                    to_be_removed.push(index);
+    async fn handle_ack(&self, socket_packet: &Packet) {
+        let Some(id) = socket_packet.id else {
+            return;
+        };
 
-                    if ack.time_started.elapsed() < ack.timeout {
-                        if let Some(ref payload) = socket_packet.data {
-                            let mut payload = Payload::from(payload.to_owned());
-                            payload.set_ack_id(socket_packet.id);
-                            ack.callback.deref_mut()(payload, self.clone()).await;
-                        }
-                        if let Some(ref attachments) = socket_packet.attachments {
-                            if let Some(payload) = attachments.first() {
-                                let payload = Payload::Binary(payload.to_owned(), socket_packet.id);
-                                ack.callback.deref_mut()(payload, self.clone()).await;
-                            }
-                        }
-                    } else {
-                        trace!("Received an Ack that is now timed out (elapsed time was longer than specified duration)");
-                    }
+        let acks = {
+            let mut outstanding = self.outstanding_acks.write().await;
+            let mut matched = Vec::new();
+            let mut index = 0;
+            while index < outstanding.len() {
+                if outstanding[index].id == id {
+                    matched.push(outstanding.remove(index));
+                } else {
+                    index += 1;
                 }
             }
-            for index in to_be_removed {
-                self.outstanding_acks.write().await.remove(index);
+            matched
+        };
+
+        for ack in acks {
+            if ack.time_started.elapsed() < ack.timeout {
+                // The user ack callback type is `Fn(...) -> BoxFuture<'static, ()>`
+                // so there is no error channel to propagate (same as in the
+                // serial-dispatch implementation); a panicking callback is
+                // isolated by the task executor, consistent with event paths.
+                if let Some(ref payload) = socket_packet.data {
+                    let mut payload = Payload::from(payload.to_owned());
+                    payload.set_ack_id(socket_packet.id);
+                    let _ = ack.callback.deref()(payload, self.clone()).await;
+                }
+                if let Some(ref attachments) = socket_packet.attachments {
+                    if let Some(payload) = attachments.first() {
+                        let payload = Payload::Binary(payload.to_owned(), socket_packet.id);
+                        let _ = ack.callback.deref()(payload, self.clone()).await;
+                    }
+                }
+            } else {
+                trace!("Received an Ack that is now timed out (elapsed time was longer than specified duration)");
             }
         }
-        Ok(())
     }
 
     /// Handles a binary event.
@@ -602,85 +691,176 @@ impl Client {
         Ok(())
     }
 
-    /// Handles the incoming messages and classifies what callbacks to call and how.
-    /// This method is later registered as the callback for the `on_data` event of the
-    /// engineio client.
+    /// Schedules dispatch of an incoming socket.io packet without ever
+    /// awaiting user code: state machine writes (disconnect_reason) happen
+    /// inline, every user-facing callback is spawned as a tracked task
+    /// (issue #12) so the reader can immediately read the next packet.
     #[inline]
-    async fn handle_socketio_packet(&self, packet: &Packet) -> Result<()> {
-        if packet.nsp == self.nsp {
-            match packet.packet_type {
-                PacketId::Ack | PacketId::BinaryAck => {
-                    if let Err(err) = self.handle_ack(packet).await {
-                        self.callback(&Event::Error, err.to_string(), None).await?;
-                        return Err(err);
-                    }
-                }
-                PacketId::BinaryEvent => {
-                    if let Err(err) = self.handle_binary_event(packet).await {
-                        self.callback(&Event::Error, err.to_string(), None).await?;
-                    }
-                }
-                PacketId::Connect => {
-                    *(self.disconnect_reason.write().await) = DisconnectReason::default();
-                    self.callback(&Event::Connect, "", None).await?;
-                }
-                PacketId::Disconnect => {
-                    *(self.disconnect_reason.write().await) = DisconnectReason::Server;
-                    self.callback(
-                        &Event::Close,
-                        CloseReason::IOServerDisconnect.as_str(),
-                        None,
-                    )
-                    .await?;
-                }
-                PacketId::ConnectError => {
-                    self.callback(
-                        &Event::Error,
-                        String::from("Received an ConnectError frame: ")
-                            + packet
-                                .data
-                                .as_ref()
-                                .unwrap_or(&String::from("\"No error message provided\"")),
-                        None,
-                    )
-                    .await?;
-                }
-                PacketId::Event => {
-                    if let Err(err) = self.handle_event(packet).await {
-                        self.callback(&Event::Error, err.to_string(), None).await?;
-                    }
-                }
+    async fn handle_socketio_packet(&self, packet: &Packet) {
+        if packet.nsp != self.nsp {
+            return;
+        }
+        match packet.packet_type {
+            PacketId::Ack | PacketId::BinaryAck => {
+                let packet = packet.clone();
+                let client = self.clone();
+                self.spawn_dispatch(async move { client.handle_ack(&packet).await }, false);
+            }
+            PacketId::BinaryEvent => {
+                let packet = packet.clone();
+                let client = self.clone();
+                self.spawn_dispatch(
+                    async move {
+                        if let Err(err) = client.handle_binary_event(&packet).await {
+                            let _ = client.callback(&Event::Error, err.to_string(), None).await;
+                        }
+                    },
+                    false,
+                );
+            }
+            PacketId::Connect => {
+                *(self.disconnect_reason.write().await) = DisconnectReason::default();
+                let client = self.clone();
+                // Terminal: survives a stream-end abort so a connect-then-
+                // immediate-transport-drop still runs the Connect callback.
+                self.spawn_dispatch(
+                    async move {
+                        let _ = client.callback(&Event::Connect, "", None).await;
+                    },
+                    true,
+                );
+            }
+            PacketId::Disconnect => {
+                *(self.disconnect_reason.write().await) = DisconnectReason::Server;
+                // In-flight dispatch tasks belong to the now-dead session. They
+                // are aborted (non-terminal) before the Close callback runs.
+                self.abort_dispatch(false);
+                let client = self.clone();
+                self.spawn_dispatch(
+                    async move {
+                        let _ = client
+                            .callback(
+                                &Event::Close,
+                                CloseReason::IOServerDisconnect.as_str(),
+                                None,
+                            )
+                            .await;
+                    },
+                    true,
+                );
+            }
+            PacketId::ConnectError => {
+                let client = self.clone();
+                let message = String::from("Received an ConnectError frame: ")
+                    + packet
+                        .data
+                        .as_ref()
+                        .unwrap_or(&String::from("\"No error message provided\""));
+                self.spawn_dispatch(
+                    async move {
+                        let _ = client.callback(&Event::Error, message, None).await;
+                    },
+                    false,
+                );
+            }
+            PacketId::Event => {
+                let packet = packet.clone();
+                let client = self.clone();
+                self.spawn_dispatch(
+                    async move {
+                        if let Err(err) = client.handle_event(&packet).await {
+                            let _ = client.callback(&Event::Error, err.to_string(), None).await;
+                        }
+                    },
+                    false,
+                );
             }
         }
-        Ok(())
     }
 
     /// Returns the packet stream for the client.
+    ///
+    /// The reader never awaits user callbacks: every packet is scheduled as an
+    /// independent dispatch task (issue #12), so Engine.IO pings and later
+    /// packets keep flowing while a long callback is pending.
     pub(crate) async fn as_stream<'a>(
         &'a self,
     ) -> Pin<Box<dyn Stream<Item = Result<Packet>> + Send + 'a>> {
         let socket_clone = (*self.socket.read().await).clone();
+        let state = ReaderState {
+            socket: socket_clone,
+            client: self.clone(),
+        };
 
-        stream::unfold(socket_clone, |mut socket| async {
+        stream::unfold(state, |mut state| async move {
             // wait for the next payload
-            let packet: Option<std::result::Result<Packet, Error>> = socket.next().await;
+            let packet: Option<std::result::Result<Packet, Error>> = state.socket.next().await;
             match packet {
                 // end the stream if the underlying one is closed
-                None => None,
+                None => {
+                    // Abort in-flight non-terminal dispatch tasks of the dead
+                    // session; terminal Close/Error notifications survive.
+                    state.client.abort_dispatch(false);
+                    None
+                }
                 Some(Err(err)) => {
-                    // call the error callback
-                    match self.callback(&Event::Error, err.to_string(), None).await {
-                        Err(callback_err) => Some((Err(callback_err), socket)),
-                        Ok(_) => Some((Err(err), socket)),
+                    // A manual disconnect may have raced ahead of buffered
+                    // packets: stop the reader instead of dispatching errors
+                    // against the torn-down session.
+                    if matches!(
+                        *state.client.disconnect_reason.read().await,
+                        DisconnectReason::Manual
+                    ) {
+                        state.client.abort_dispatch(false);
+                        None
+                    } else {
+                        // Terminal: the stream yields Err and ends right after, so
+                        // a plain task would be aborted before it ever runs.
+                        let client = state.client.clone();
+                        let message = err.to_string();
+                        state.client.spawn_dispatch(
+                            async move {
+                                let _ = client.callback(&Event::Error, message, None).await;
+                            },
+                            true,
+                        );
+                        Some((Err(err), state))
                     }
                 }
-                Some(Ok(packet)) => match self.handle_socketio_packet(&packet).await {
-                    Err(callback_err) => Some((Err(callback_err), socket)),
-                    Ok(_) => Some((Ok(packet), socket)),
-                },
+                Some(Ok(packet)) => {
+                    // Same guard as above: a manual disconnect must stop
+                    // dispatching the packets buffered after it (issue #12).
+                    if matches!(
+                        *state.client.disconnect_reason.read().await,
+                        DisconnectReason::Manual
+                    ) {
+                        state.client.abort_dispatch(false);
+                        None
+                    } else {
+                        state.client.handle_socketio_packet(&packet).await;
+                        Some((Ok(packet), state))
+                    }
+                }
             }
         })
         .boxed()
+    }
+}
+
+/// State carried by the reader stream of [`Client::as_stream`]. Owned (no
+/// borrow of the `Client`) so the stream can be sendable, spawned-into and
+/// dropped freely.
+struct ReaderState {
+    socket: InnerSocket,
+    client: Client,
+}
+
+impl Drop for ReaderState {
+    fn drop(&mut self) {
+        // Belt-and-braces: if the stream is dropped without being fully
+        // consumed (e.g. a connect_manual iterator aborted early), in-flight
+        // non-terminal dispatch tasks are cut as well.
+        self.client.abort_dispatch(false);
     }
 }
 
@@ -803,6 +983,176 @@ mod test {
         let timeout = timeout(Duration::from_secs(5), notify.notified()).await;
         assert!(timeout.is_ok());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn socket_io_callbacks_do_not_block_reader() -> Result<()> {
+        // Issue #12: a long-running event callback must not block the reader
+        // from dispatching the next packet on the same connection.
+        let url = crate::test::socket_io_server();
+
+        let long_started = Arc::new(tokio::sync::Notify::new());
+        let long_done = Arc::new(tokio::sync::Notify::new());
+        let test_event = Arc::new(tokio::sync::Notify::new());
+
+        let long_started_clone = long_started.clone();
+        let long_done_clone = long_done.clone();
+        let test_event_clone = test_event.clone();
+
+        let socket = ClientBuilder::new(url)
+            .on("message", move |_, _| {
+                let started = long_started_clone.clone();
+                let done = long_done_clone.clone();
+                async move {
+                    started.notify_one();
+                    sleep(Duration::from_secs(3)).await;
+                    done.notify_one();
+                }
+                .boxed()
+            })
+            .on("test", move |_, _| {
+                let test_event = test_event_clone.clone();
+                async move {
+                    test_event.notify_one();
+                }
+                .boxed()
+            })
+            .connect()
+            .await?;
+
+        // The server emits "message" and "test" right after connect. The long
+        // callback is dispatched first; the "test" event must not wait for it.
+        let started = timeout(Duration::from_secs(2), long_started.notified()).await;
+        assert!(started.is_ok(), "long callback should start");
+
+        let test_rx = timeout(Duration::from_secs(1), test_event.notified()).await;
+        assert!(
+            test_rx.is_ok(),
+            "reader must not be blocked by a long-running callback (issue #12)"
+        );
+
+        // The long callback is still awaited to completion while connected.
+        let done = timeout(Duration::from_secs(10), long_done.notified()).await;
+        assert!(
+            done.is_ok(),
+            "long callback should complete while connected"
+        );
+
+        socket.disconnect().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn socket_io_disconnect_aborts_pending_dispatch() -> Result<()> {
+        // Issue #12: teardown must leave no leftover dispatch tasks — a
+        // callback pending at manual disconnect must be aborted, not fire late.
+        let url = crate::test::socket_io_server();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(tokio::sync::Notify::new());
+
+        let started_clone = started.clone();
+        let finished_clone = finished.clone();
+
+        let socket = ClientBuilder::new(url)
+            .on("test", move |_, _| {
+                let started = started_clone.clone();
+                let finished = finished_clone.clone();
+                async move {
+                    started.notify_one();
+                    sleep(Duration::from_secs(3)).await;
+                    finished.notify_one();
+                }
+                .boxed()
+            })
+            .connect()
+            .await?;
+
+        // The server emits "test" right after connect; wait until the callback is in flight.
+        let started = timeout(Duration::from_secs(2), started.notified()).await;
+        assert!(started.is_ok(), "long callback should start");
+
+        socket.disconnect().await?;
+
+        let finished = timeout(Duration::from_secs(4), finished.notified()).await;
+        assert!(
+            finished.is_err(),
+            "pending dispatch must be aborted on manual disconnect (issue #12)"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn socket_io_long_callback_keeps_heartbeat_alive() -> Result<()> {
+        // Issue #12: with a fast-heartbeat server (pingInterval 300ms /
+        // pingTimeout 700ms), a long callback must not stall Engine.IO pings
+        // — otherwise the server cuts the connection and Close fires once the
+        // stalled reader resumes. The observation window must exceed the
+        // callback duration: while the reader is blocked, it cannot observe
+        // the already-dead transport.
+        let url = crate::test::socket_io_fast_ping_server();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let done = Arc::new(tokio::sync::Notify::new());
+        let (close_tx, mut close_rx) = mpsc::channel::<Payload>(1);
+        let (echo_tx, mut echo_rx) = mpsc::channel::<Payload>(1);
+
+        let started_clone = started.clone();
+        let done_clone = done.clone();
+        let close_tx_clone = close_tx.clone();
+
+        let socket = ClientBuilder::new(url)
+            .on("test", move |_, _| {
+                let started = started_clone.clone();
+                let done = done_clone.clone();
+                async move {
+                    started.notify_one();
+                    sleep(Duration::from_millis(2500)).await;
+                    done.notify_one();
+                }
+                .boxed()
+            })
+            .on(Event::Close, move |payload, _| {
+                let close_tx = close_tx_clone.clone();
+                async move {
+                    let _ = close_tx.send(payload).await;
+                }
+                .boxed()
+            })
+            .on("test-received", move |payload, _| {
+                let echo_tx = echo_tx.clone();
+                async move {
+                    let _ = echo_tx.send(payload).await;
+                }
+                .boxed()
+            })
+            .connect()
+            .await?;
+
+        let started = timeout(Duration::from_secs(2), started.notified()).await;
+        assert!(started.is_ok(), "long callback should start");
+
+        // No transport close within 4s while the 2.5s callback is pending.
+        let close = timeout(Duration::from_secs(4), close_rx.recv()).await;
+        assert!(
+            close.is_err(),
+            "connection must survive a long callback (issue #12)"
+        );
+
+        let done = timeout(Duration::from_secs(5), done.notified()).await;
+        assert!(done.is_ok(), "long callback should complete");
+
+        // The connection must still be usable after the callback finished.
+        socket.emit("test", json!("alive")).await?;
+        let echo = timeout(Duration::from_secs(1), echo_rx.recv()).await;
+        assert!(
+            echo.is_ok(),
+            "connection must still be usable after a long callback"
+        );
+
+        socket.disconnect().await?;
         Ok(())
     }
 
@@ -1036,11 +1386,15 @@ mod test {
             .connect()
             .await?;
 
-        let event = rx.recv().await.unwrap();
-        assert_eq!(event, "message");
+        // Since issue #12, events are dispatched concurrently and their
+        // completion order is not guaranteed — only membership is.
+        let mut events = Vec::new();
+        for _ in 0..2 {
+            events.push(rx.recv().await.unwrap());
+        }
 
-        let event = rx.recv().await.unwrap();
-        assert_eq!(event, "test");
+        assert!(events.contains(&"message".to_owned()));
+        assert!(events.contains(&"test".to_owned()));
 
         Ok(())
     }

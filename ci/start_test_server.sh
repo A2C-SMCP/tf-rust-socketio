@@ -23,6 +23,14 @@ if [ $status -ne 0 ]; then
 fi
 echo "Successfully started socket.io instance"
 
+DEBUG=* node socket-io-fastping.js &
+status=$?
+if [ $status -ne 0 ]; then
+  echo "Failed to start socket.io fastping: $status"
+  exit $status
+fi
+echo "Successfully started socket.io fastping instance"
+
 DEBUG=* node socket-io-auth.js &
 status=$?
 if [ $status -ne 0 ]; then

@@ -273,4 +273,19 @@ pub(crate) mod test {
 
         url
     }
+
+    // The socket.io fast heartbeat server for testing runs on port 4207
+    const FAST_PING_SERVER_URL: &str = "http://localhost:4207";
+
+    pub(crate) fn socket_io_fast_ping_server() -> Url {
+        let url = std::env::var("SOCKET_IO_FAST_PING_SERVER")
+            .unwrap_or_else(|_| FAST_PING_SERVER_URL.to_owned());
+        let mut url = Url::parse(&url).unwrap();
+
+        if url.path() == "/" {
+            url.set_path("/socket.io/");
+        }
+
+        url
+    }
 }
