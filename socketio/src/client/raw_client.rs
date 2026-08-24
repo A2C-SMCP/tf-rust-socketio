@@ -313,6 +313,13 @@ impl RawClient {
         Iter { socket: self }
     }
 
+    // NOTE (issue #12 follow-up): unlike the async client, this synchronous
+    // client keeps the upstream "single reader, strictly serial dispatch"
+    // contract — user callbacks run inline on the polling caller's thread. If
+    // a long callback is registered, heartbeats and later packets stall here
+    // too. The sync side is intentionally out of scope of #12; if the serial
+    // contract needs to be relaxed, a per-event worker-thread dispatch (or a
+    // documented "no long callbacks" rule) is the follow-up.
     fn callback<P: Into<Payload>>(
         &self,
         event: &Event,

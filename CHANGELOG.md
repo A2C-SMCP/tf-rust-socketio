@@ -38,6 +38,37 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ## _[Unreleased]_
 
+### Breaking Changes
+- The asynchronous client (`ClientBuilder::on` / `ClientBuilder::on_any` / `Client::emit_with_ack`,
+  `async` feature) now requires callbacks to be `Fn` instead of `FnMut`. Callbacks sharing
+  mutable state must use interior mutability (e.g. `Arc<Mutex<_>>`); plain captured state and
+  non-capturing closures are unaffected.
+- The asynchronous client dispatches socket.io packets as independent tasks instead of
+  strictly serial dispatch: events within the same connection are no longer guaranteed to be
+  delivered in completion order (only the socket.io wire order is preserved). User callbacks
+  must be safe to invoke concurrently and must not rely on `FnMut`-style captured-state
+  mutation. This aligns the client with python-socketio / JS socket.io / socketioxide.
+  The synchronous client keeps the serial contract for now (see follow-up note in
+  `raw_client.rs`).
+
+### Changed
+- Long-running event/ack callbacks no longer block the reader: Engine.IO pings (PONG replies)
+  and subsequent packets keep flowing while a callback is pending — a callback cannot stall the
+  heartbeat anymore ([#12](https://github.com/A2C-SMCP/tf-rust-socketio/issues/12)).
+- Manual `disconnect()` / server `Disconnect` / transport close now abort in-flight dispatch
+  tasks, so no user callback fires late against a torn-down connection.
+- Ack handling no longer holds the outstanding-acks lock while invoking user callbacks
+  (previously a slow ack callback stalled `emit_with_ack` and the reader). The buffered
+  outstanding ack removal was also healed: index-based removal no longer leaks colliding ids.
+- Teardown ordering: `disconnect()` aborts pending dispatch after the transport teardown, so a
+  `disconnect()` issued from inside a callback still completes the protocol close.
+
+### Compatibility
+- Wire format, packet ordering on the wire and ack-id association semantics are unchanged.
+- `reconnect_on_disconnect` / `DisconnectReason` semantics are unchanged; the transport-close
+  callback is now dispatched concurrently instead of being awaited inline (a long Close handler
+  no longer delays the reconnect decision).
+
 ## <a name="080">[0.8.0] - _Preserve HTTP error body on Engine.IO handshake failure_ </a>
 
 _2026.04.27_
