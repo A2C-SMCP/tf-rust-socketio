@@ -496,7 +496,7 @@ impl Client {
         callback: F,
     ) -> Result<()>
     where
-        F: for<'a> std::ops::Fn(Payload, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync,
+        F: std::ops::Fn(Payload, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync,
         E: Into<Event>,
         D: Into<Payload>,
     {
@@ -615,6 +615,10 @@ impl Client {
 
         for ack in acks {
             if ack.time_started.elapsed() < ack.timeout {
+                // The user ack callback type is `Fn(...) -> BoxFuture<'static, ()>`
+                // so there is no error channel to propagate (same as in the
+                // serial-dispatch implementation); a panicking callback is
+                // isolated by the task executor, consistent with event paths.
                 if let Some(ref payload) = socket_packet.data {
                     let mut payload = Payload::from(payload.to_owned());
                     payload.set_ack_id(socket_packet.id);

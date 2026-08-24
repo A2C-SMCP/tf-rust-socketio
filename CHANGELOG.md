@@ -68,6 +68,11 @@ The format is based on [Keep a Changelog], and this project adheres to
 - `reconnect_on_disconnect` / `DisconnectReason` semantics are unchanged; the transport-close
   callback is now dispatched concurrently instead of being awaited inline (a long Close handler
   no longer delays the reconnect decision).
+- Senders that rely on the ordering between same-connection events (e.g. a `request` that should
+  be processed before a later `cancel` of the same operation) must tolerate at the application
+  layer that the `cancel` may be handled before the `request` handler is registered, in which
+  case it is a no-op — the same semantics as python-socketio / JS socket.io. The 300ms/700ms
+  fast-heartbeat boundary test covers this practice shape.
 
 ## <a name="080">[0.8.0] - _Preserve HTTP error body on Engine.IO handshake failure_ </a>
 
