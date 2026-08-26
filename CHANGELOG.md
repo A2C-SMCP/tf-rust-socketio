@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ## Overview
 
+* [`0.9.1`](#091) - _2026.08.26_
 * [`0.9.0`](#090) - _2026.08.24_
 * [`0.8.0`](#080) - _2026.04.27_
 * [`0.7.0`](#070) - _2026.02.01_
@@ -35,6 +36,24 @@ The format is based on [Keep a Changelog], and this project adheres to
 * [`0.2.0`](#020) – _2021.03.13_
 * [`0.1.1`](#011) – _2021.01.10_
 * [`0.1.0`](#010) – _2021.01.05_
+
+## <a name="091">[0.9.1] - _Transport close no longer blocked by pending reconnect auth_ </a>
+
+_2026.08.26_
+
+### Fixed
+- The asynchronous client (`async` feature) delivered the `Close` event only after a
+  pending `on_reconnect` callback (e.g. auth refresh) finished: `reconnect()` held the
+  builder lock while awaiting the user callback and the transport handshake, while the
+  Close/event dispatch path needs the same lock in shared mode. A slow auth refresh could
+  delay the disconnect notification — and a late Close could land on an already
+  re-established session ([#14](https://github.com/A2C-SMCP/tf-rust-socketio/issues/14)).
+- The user `on_reconnect` callback now runs outside any lock; the transport handshake runs
+  under a shared lock — reconnect no longer blocks lifecycle notifications.
+
+### Compatibility
+- No public API changes; `on_reconnect` keeps its `FnMut` signature and semantics (a new
+  token is still required before reconnecting). The synchronous client is unaffected.
 
 ## <a name="090">[0.9.0] - _Async callback concurrent dispatch — reader never blocks on user callbacks_ </a>
 
