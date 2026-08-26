@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "tf-rust-engineio"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "adler32",
  "async-stream",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "tf-rust-socketio"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "adler32",
  "async-stream",
