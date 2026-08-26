@@ -134,25 +134,44 @@ impl Client {
     }
 
     pub(crate) async fn reconnect(&mut self) -> Result<()> {
-        let mut builder = self.builder.write().await;
+        // The user `on_reconnect` callback (auth refresh) must run outside the
+        // builder lock: user code under the exclusive write lock would block
+        // Close/event delivery, which only needs a shared lock (same rule as
+        // issue #12). The callback is taken out, awaited lock-free, then put
+        // back below. `reconnect()` is the only consumer of `on_reconnect`.
+        let mut on_reconnect = {
+            let mut builder = self.builder.write().await;
+            builder.on_reconnect.take()
+        };
+        let reconnect_settings = match on_reconnect.as_mut() {
+            Some(callback) => Some(callback().await),
+            None => None,
+        };
 
-        if let Some(config) = builder.on_reconnect.as_mut() {
-            let reconnect_settings = config().await;
+        // Apply refreshed settings under a short write lock, then build the
+        // new transport under a shared lock so the network handshake cannot
+        // stall event dispatch.
+        {
+            let mut builder = self.builder.write().await;
+            if let Some(reconnect_settings) = reconnect_settings {
+                if let Some(address) = reconnect_settings.address {
+                    builder.address = address;
+                }
 
-            if let Some(address) = reconnect_settings.address {
-                builder.address = address;
+                if let Some(auth) = reconnect_settings.auth {
+                    self.auth = Some(auth);
+                }
+
+                if reconnect_settings.headers.is_some() {
+                    builder.opening_headers = reconnect_settings.headers;
+                }
             }
-
-            if let Some(auth) = reconnect_settings.auth {
-                self.auth = Some(auth);
-            }
-
-            if reconnect_settings.headers.is_some() {
-                builder.opening_headers = reconnect_settings.headers;
+            if let Some(cb) = on_reconnect {
+                builder.on_reconnect = Some(cb);
             }
         }
 
-        let socket = builder.inner_create().await?;
+        let socket = self.builder.read().await.inner_create().await?;
 
         // New inner socket that can be connected
         let mut client_socket = self.socket.write().await;
@@ -1312,6 +1331,83 @@ mod test {
         );
 
         socket.disconnect().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(reconnect)]
+    async fn repro_close_callback_blocked_by_pending_reconnect_auth() -> Result<()> {
+        // Give the previous `serial(reconnect)` test's server restart time
+        // to finish before connecting.
+        sleep(Duration::from_millis(2500)).await;
+        let reconnect_started = Arc::new(tokio::sync::Notify::new());
+        let release_reconnect = Arc::new(tokio::sync::Notify::new());
+        let close_received = Arc::new(tokio::sync::Notify::new());
+        let reconnected = Arc::new(tokio::sync::Notify::new());
+        let reconnect_count = Arc::new(AtomicUsize::new(0));
+
+        let reconnect_started_cb = reconnect_started.clone();
+        let release_reconnect_cb = release_reconnect.clone();
+        let close_received_cb = close_received.clone();
+        let reconnected_cb = reconnected.clone();
+        let reconnect_count_cb = reconnect_count.clone();
+        let socket = ClientBuilder::new(crate::test::socket_io_restart_server())
+            .reconnect(true)
+            .max_reconnect_attempts(100)
+            .reconnect_delay(100, 100)
+            .on_reconnect(move || {
+                let reconnect_started = reconnect_started_cb.clone();
+                let release_reconnect = release_reconnect_cb.clone();
+                async move {
+                    reconnect_started.notify_one();
+                    release_reconnect.notified().await;
+                    ReconnectSettings::new()
+                }
+                .boxed()
+            })
+            .on(Event::Close, move |_, _| {
+                let close_received = close_received_cb.clone();
+                async move { close_received.notify_one() }.boxed()
+            })
+            .on("open", move |_, _| {
+                let reconnected = reconnected_cb.clone();
+                let count = reconnect_count_cb.clone();
+                async move {
+                    // Notify only on the second "open": the initial connect
+                    // fires one too, and a leftover permit would make the wait
+                    // below return without waiting for the reconnect.
+                    if count.fetch_add(1, Ordering::Release) + 1 == 2 {
+                        reconnected.notify_one();
+                    }
+                }
+                .boxed()
+            })
+            .connect()
+            .await?;
+
+        sleep(Duration::from_millis(500)).await;
+        socket.emit("restart_server", json!("")).await?;
+        timeout(Duration::from_secs(6), reconnect_started.notified())
+            .await
+            .expect("reconnect auth callback did not start");
+
+        let close_result = timeout(Duration::from_secs(1), close_received.notified()).await;
+        release_reconnect.notify_one();
+        assert!(
+            close_result.is_ok(),
+            "Close callback was blocked by pending reconnect auth"
+        );
+
+        // The server rebinds ~2s after `restart_server` is emitted; wait for
+        // the reconnect (second "open") before disconnecting, so the next
+        // `serial(reconnect)` test does not race the restarting server. The
+        // sleep below is a redundant settle for slow machines.
+        timeout(Duration::from_secs(6), reconnected.notified())
+            .await
+            .ok();
+        sleep(Duration::from_millis(2500)).await;
+
+        let _ = socket.disconnect().await;
         Ok(())
     }
 
