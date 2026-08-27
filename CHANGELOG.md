@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ## Overview
 
+* [`0.9.2`](#092) - _2026.08.27_
 * [`0.9.1`](#091) - _2026.08.26_
 * [`0.9.0`](#090) - _2026.08.24_
 * [`0.8.0`](#080) - _2026.04.27_
@@ -36,6 +37,24 @@ The format is based on [Keep a Changelog], and this project adheres to
 * [`0.2.0`](#020) – _2021.03.13_
 * [`0.1.1`](#011) – _2021.01.10_
 * [`0.1.0`](#010) – _2021.01.05_
+
+## <a name="092">[0.9.2] - _Close notifications carry the dying session's epoch_ </a>
+
+_2026.08.27_
+
+### Added
+- Session epoch for both clients: `session_epoch()` returns the number of successfully
+  connected sessions (1 after the initial connect, incremented on every successful
+  reconnect; failed reconnect attempts do not count).
+- `on_close_with_session(|payload, epoch, client|)` callback variant: the `epoch` argument
+  is captured when the close dispatch starts, so a `Close` notification that arrives after
+  a late reconnect still carries the epoch of the session whose transport actually died
+  ([#15](https://github.com/A2C-SMCP/tf-rust-socketio/issues/15)). The synchronous client
+  mirrors the API (`FnMut(Payload, u64, RawClient)`).
+
+### Compatibility
+- Additive only: the existing `on(Event::Close)` chain keeps firing (legacy first); both
+  chains can be registered at the same time. Existing consumers see no API change.
 
 ## <a name="091">[0.9.1] - _Transport close no longer blocked by pending reconnect auth_ </a>
 
