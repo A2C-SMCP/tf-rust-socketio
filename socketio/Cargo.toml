@@ -1,6 +1,6 @@
 [package]
 name = "tf-rust-socketio"
-version = "0.9.1"
+version = "0.9.2"
 authors = ["A2C-SMCP"]
 edition = "2021"
 description = "A Socket.IO client implementation in Rust. Fork of rust_socketio with server-to-client ACK support, reconnect headers, and close reason enhancements."
