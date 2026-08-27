@@ -1,4 +1,11 @@
-use std::{ops::Deref, pin::Pin, sync::Arc};
+use std::{
+    ops::Deref,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use backoff::{backoff::Backoff, ExponentialBackoffBuilder};
 use futures_util::{future::BoxFuture, stream, Stream, StreamExt};
@@ -94,6 +101,11 @@ pub struct Client {
     auth: Option<serde_json::Value>,
     builder: Arc<RwLock<ClientBuilder>>,
     disconnect_reason: Arc<RwLock<DisconnectReason>>,
+    // Monotonically increasing session generation (issue #15): bumped once per
+    // successful connect. `on_close_with_session` captures the dying session's
+    // value at dispatch-spawn time, so a late Close can be attributed to the
+    // session that actually died.
+    session_epoch: Arc<AtomicU64>,
     // Tracks in-flight per-packet dispatch tasks (issue #12) so they can be
     // aborted on teardown. `true` marks a task as terminal: terminal tasks
     // (Close/Error notifications of a dead session) survive a stream-end
@@ -114,8 +126,33 @@ impl Client {
             auth: builder.auth.clone(),
             builder: Arc::new(RwLock::new(builder)),
             disconnect_reason: Arc::new(RwLock::new(DisconnectReason::default())),
+            session_epoch: Arc::new(AtomicU64::new(0)),
             dispatch_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
+    }
+
+    /// Returns the current session epoch: the number of successfully connected
+    /// sessions during this client's lifetime (starting at 1 after the initial
+    /// connect, incremented by every successful reconnect). Every close
+    /// delivered by [`ClientBuilder::on_close_with_session`] carries the epoch
+    /// of the session whose transport actually died — which, for a close that
+    /// runs late, may differ from the epoch this accessor reports here.
+    ///
+    /// # Example
+    /// ```
+    /// use tf_rust_socketio::asynchronous::ClientBuilder;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let socket = ClientBuilder::new("http://localhost:4200/")
+    ///         .connect()
+    ///         .await
+    ///         .expect("connection failed");
+    ///     println!("current session: {}", socket.session_epoch());
+    /// }
+    /// ```
+    pub fn session_epoch(&self) -> u64 {
+        self.session_epoch.load(Ordering::Relaxed)
     }
 
     /// Connects the client to a server. Afterwards the `emit_*` methods can be
@@ -129,6 +166,11 @@ impl Client {
         let open_packet = Packet::new(PacketId::Connect, self.nsp.clone(), auth, None, 0, None);
 
         self.socket.read().await.send(open_packet).await?;
+
+        // Only a successful handshake + CONNECT counts as a session (issue
+        // #15); failed reconnect attempts return via `?` above without
+        // bumping the epoch.
+        self.session_epoch.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -219,15 +261,17 @@ impl Client {
                         // and manual client close are handled explicitly.
                         // The callback is spawned as a terminal dispatch task so a
                         // long Close handler cannot stall the reconnect decision
-                        // (issue #12).
+                        // (issue #12). The epoch is captured here, before the
+                        // reconnect below can bump it, so the close is
+                        // attributed to the dying session (issue #15).
+                        let close_epoch = client_clone.session_epoch();
                         let close_client = client_clone.clone();
                         client_clone.spawn_dispatch(
                             async move {
                                 if let Some(err) = close_client
-                                    .callback(
-                                        &Event::Close,
+                                    .callback_close(
                                         CloseReason::TransportClose.as_str(),
-                                        None,
+                                        close_epoch,
                                     )
                                     .await
                                     .err()
@@ -606,6 +650,26 @@ impl Client {
         Ok(())
     }
 
+    /// Fires the close chain for the given reason: the legacy
+    /// `on(Event::Close)` registration first (timing unchanged), then
+    /// `on_close_with_session` with the epoch captured when the close dispatch
+    /// was spawned (issue #15). Same lock discipline as [`Self::callback`]: the
+    /// registration is cloned out of the builder lock and the user callback
+    /// runs outside it.
+    async fn callback_close(&self, reason: &str, epoch: u64) -> Result<()> {
+        self.callback(&Event::Close, reason, None).await?;
+
+        let close_callback = {
+            let builder = self.builder.read().await;
+            builder.on_close_with_session.clone()
+        };
+        if let Some(callback) = close_callback {
+            callback(Payload::from(reason), epoch, self.clone()).await;
+        }
+
+        Ok(())
+    }
+
     /// Handles an incoming ack. Matching outstanding acks are taken out under
     /// one short lock; the user callbacks run outside the lock so a slow ack
     /// callback cannot stall the reader or other ack/event dispatch (issue #12).
@@ -753,16 +817,15 @@ impl Client {
                 *(self.disconnect_reason.write().await) = DisconnectReason::Server;
                 // In-flight dispatch tasks belong to the now-dead session. They
                 // are aborted (non-terminal) before the Close callback runs.
+                // The epoch is captured before the spawn so the close carries
+                // this dying session's generation (issue #15).
                 self.abort_dispatch(false);
+                let epoch = self.session_epoch();
                 let client = self.clone();
                 self.spawn_dispatch(
                     async move {
                         let _ = client
-                            .callback(
-                                &Event::Close,
-                                CloseReason::IOServerDisconnect.as_str(),
-                                None,
-                            )
+                            .callback_close(CloseReason::IOServerDisconnect.as_str(), epoch)
                             .await;
                     },
                     true,
@@ -1406,6 +1469,170 @@ mod test {
             .await
             .ok();
         sleep(Duration::from_millis(2500)).await;
+
+        let _ = socket.disconnect().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(reconnect)]
+    async fn on_close_with_session_gets_dying_session_epoch() -> Result<()> {
+        // Give the previous `serial(reconnect)` test's server restart time
+        // to finish before connecting.
+        sleep(Duration::from_millis(2500)).await;
+
+        let close_fired = Arc::new(tokio::sync::Notify::new());
+        let release_close = Arc::new(tokio::sync::Notify::new());
+        let recorded_done = Arc::new(tokio::sync::Notify::new());
+        // What the new close chain observed: (epoch param from the callback,
+        // `session_epoch()` read when the callback body finally ran). The
+        // record happens only after the reconnect has completed, so a correct
+        // implementation yields (1, 2) — the accessor reports the new session
+        // while the param must keep the dying session's value.
+        let recorded = Arc::new(Mutex::new(None::<(u64, u64)>));
+
+        let close_fired_cb = close_fired.clone();
+        let release_close_cb = release_close.clone();
+        let recorded_done_cb = recorded_done.clone();
+        let recorded_cb = recorded.clone();
+
+        let socket = ClientBuilder::new(crate::test::socket_io_restart_server())
+            .reconnect(true)
+            .max_reconnect_attempts(100)
+            .reconnect_delay(100, 100)
+            .on(Event::Close, move |_, _| {
+                let close_fired = close_fired_cb.clone();
+                let release_close = release_close_cb.clone();
+                async move {
+                    // Gate the close chain: the new chain below only runs after
+                    // this legacy callback returns. The test lets the reconnect
+                    // complete first, so the new chain executes with the epoch
+                    // already bumped — the param must still be the dying
+                    // session's value captured at dispatch-spawn time (issue
+                    // #15), not re-read from the accessor mid-chain.
+                    close_fired.notify_one();
+                    release_close.notified().await;
+                }
+                .boxed()
+            })
+            .on_close_with_session(move |_payload, epoch, client| {
+                let recorded = recorded_cb.clone();
+                let recorded_done = recorded_done_cb.clone();
+                async move {
+                    *recorded.lock().await = Some((epoch, client.session_epoch()));
+                    recorded_done.notify_one();
+                }
+                .boxed()
+            })
+            .connect()
+            .await?;
+
+        assert_eq!(socket.session_epoch(), 1, "initial connect = epoch 1");
+
+        sleep(Duration::from_millis(500)).await;
+        socket.emit("restart_server", json!("")).await?;
+
+        // The close chain started (legacy callback entered) while the dying
+        // session was still the current one.
+        let close_result = timeout(Duration::from_secs(2), close_fired.notified()).await;
+        assert!(
+            close_result.is_ok(),
+            "close did not fire after transport close"
+        );
+
+        // Let the reconnect complete (the restart server rebinds ~2s after the
+        // emit) while the close chain is gated.
+        timeout(Duration::from_secs(8), async {
+            while socket.session_epoch() < 2 {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("reconnect did not complete");
+        assert_eq!(socket.session_epoch(), 2, "successful reconnect = epoch 2");
+
+        // Release the gate: from here the new chain runs against the new
+        // session. The epoch param must still be the dying session's value
+        // (1) while the accessor already reports 2.
+        release_close.notify_one();
+        timeout(Duration::from_secs(2), recorded_done.notified())
+            .await
+            .expect("on_close_with_session did not run after the release");
+        assert_eq!(
+            *recorded.lock().await,
+            Some((1, 2)),
+            "late close must carry the dying session's epoch, not the accessor's"
+        );
+
+        sleep(Duration::from_millis(2500)).await;
+        let _ = socket.disconnect().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn on_close_with_session_ioserver_disconnect_gets_current_session_epoch() -> Result<()> {
+        // The 4206 restart-url-auth server closes the socket when the
+        // handshake timestamp is invalid (ci/socket-io-restart-url-auth.js),
+        // so the client receives a socket.io Disconnect packet and the
+        // IOServerDisconnect close chain fires with the current session's
+        // epoch.
+        let mut url = crate::test::socket_io_restart_url_auth_server();
+        url.set_query(Some("timestamp=1"));
+
+        let close_called = Arc::new(tokio::sync::Notify::new());
+        let recorded = Arc::new(Mutex::new(None::<(Payload, u64)>));
+        let close_called_cb = close_called.clone();
+        let recorded_cb = recorded.clone();
+        // Both close chains must fire on the same close, legacy first.
+        let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let order_legacy = order.clone();
+        let order_new = order.clone();
+
+        let socket = ClientBuilder::new(url)
+            .on(Event::Close, move |_, _| {
+                let order = order_legacy.clone();
+                async move { order.lock().await.push("legacy") }.boxed()
+            })
+            .on_close_with_session(move |payload, epoch, _client| {
+                let order = order_new.clone();
+                let recorded = recorded_cb.clone();
+                let close_called = close_called_cb.clone();
+                async move {
+                    order.lock().await.push("new");
+                    *recorded.lock().await = Some((payload, epoch));
+                    close_called.notify_one();
+                }
+                .boxed()
+            })
+            .connect()
+            .await?;
+
+        let close_result = timeout(Duration::from_secs(3), close_called.notified()).await;
+        assert!(
+            close_result.is_ok(),
+            "on_close_with_session did not fire on server disconnect"
+        );
+
+        assert_eq!(
+            *order.lock().await,
+            ["legacy", "new"],
+            "both close chains must fire, legacy first"
+        );
+        let (payload, epoch) = recorded
+            .lock()
+            .await
+            .take()
+            .expect("close callback did not record");
+        assert_eq!(
+            payload,
+            Payload::from(CloseReason::IOServerDisconnect.as_str()),
+            "close reason must be ioserverdisconnect"
+        );
+        assert_eq!(
+            epoch, 1,
+            "server-disconnect close carries the current session epoch"
+        );
+        assert_eq!(socket.session_epoch(), 1, "no reconnect, session stays 1");
 
         let _ = socket.disconnect().await;
         Ok(())

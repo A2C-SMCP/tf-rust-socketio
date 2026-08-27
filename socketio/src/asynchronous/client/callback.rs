@@ -19,6 +19,11 @@ pub(crate) type DynAsyncCallback =
 pub(crate) type DynAsyncAnyCallback =
     Box<dyn Fn(Event, Payload, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync>;
 
+/// Close callback with the session epoch captured when the close dispatch was
+/// spawned (the still-dying session's generation, see issue #15).
+pub(crate) type DynAsyncCloseCallback =
+    Box<dyn Fn(Payload, u64, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync>;
+
 pub(crate) type DynAsyncReconnectSettingsCallback =
     Box<dyn FnMut() -> BoxFuture<'static, ReconnectSettings> + 'static + Send + Sync>;
 
@@ -63,6 +68,25 @@ impl Callback<DynAsyncAnyCallback> {
     pub(crate) fn new<T>(callback: T) -> Self
     where
         T: Fn(Event, Payload, Client) -> BoxFuture<'static, ()> + 'static + Sync + Send,
+    {
+        Callback {
+            inner: Box::new(callback),
+        }
+    }
+}
+
+impl Deref for Callback<DynAsyncCloseCallback> {
+    type Target = dyn Fn(Payload, u64, Client) -> BoxFuture<'static, ()> + 'static + Sync + Send;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref()
+    }
+}
+
+impl Callback<DynAsyncCloseCallback> {
+    pub(crate) fn new<T>(callback: T) -> Self
+    where
+        T: Fn(Payload, u64, Client) -> BoxFuture<'static, ()> + 'static + Sync + Send,
     {
         Callback {
             inner: Box::new(callback),

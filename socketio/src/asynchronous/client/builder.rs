@@ -12,7 +12,8 @@ use crate::{error::Result, Event, Payload, TransportType};
 
 use super::{
     callback::{
-        Callback, DynAsyncAnyCallback, DynAsyncCallback, DynAsyncReconnectSettingsCallback,
+        Callback, DynAsyncAnyCallback, DynAsyncCallback, DynAsyncCloseCallback,
+        DynAsyncReconnectSettingsCallback,
     },
     client::{Client, ReconnectSettings},
 };
@@ -28,6 +29,7 @@ pub struct ClientBuilder {
     // builder lock and run them in spawned dispatch tasks (issue #12).
     pub(crate) on: HashMap<Event, Arc<Callback<DynAsyncCallback>>>,
     pub(crate) on_any: Option<Arc<Callback<DynAsyncAnyCallback>>>,
+    pub(crate) on_close_with_session: Option<Arc<Callback<DynAsyncCloseCallback>>>,
     pub(crate) on_reconnect: Option<Callback<DynAsyncReconnectSettingsCallback>>,
     pub(crate) namespace: String,
     tls_config: Option<TlsConnector>,
@@ -88,6 +90,7 @@ impl ClientBuilder {
             address: address.into(),
             on: HashMap::new(),
             on_any: None,
+            on_close_with_session: None,
             on_reconnect: None,
             namespace: "/".to_owned(),
             tls_config: None,
@@ -197,6 +200,43 @@ impl ClientBuilder {
             event.into(),
             Arc::new(Callback::<DynAsyncCallback>::new(callback)),
         );
+        self
+    }
+
+    /// Registers a close callback that carries the session epoch of the dying
+    /// transport. The `epoch` argument is captured when the close dispatch is
+    /// spawned — the still-dying session's generation (see issue #15) — and is
+    /// NOT read from [`Client::session_epoch`] inside the callback, because a
+    /// late close may run after a reconnect already started a new session.
+    ///
+    /// The existing `on(Event::Close, ...)` chain keeps firing; both may be
+    /// registered at the same time.
+    ///
+    /// # Example
+    /// ```rust
+    /// use tf_rust_socketio::asynchronous::ClientBuilder;
+    /// use futures_util::future::FutureExt;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let client = ClientBuilder::new("http://localhost:4200/")
+    ///         .on_close_with_session(|payload, epoch, _client| {
+    ///             async move {
+    ///                 println!("{:?} from session {epoch}", payload);
+    ///             }
+    ///             .boxed()
+    ///         })
+    ///         .connect()
+    ///         .await;
+    /// }
+    /// ```
+    #[cfg(feature = "async-callbacks")]
+    pub fn on_close_with_session<F>(mut self, callback: F) -> Self
+    where
+        F: std::ops::Fn(Payload, u64, Client) -> BoxFuture<'static, ()> + 'static + Send + Sync,
+    {
+        self.on_close_with_session =
+            Some(Arc::new(Callback::<DynAsyncCloseCallback>::new(callback)));
         self
     }
 

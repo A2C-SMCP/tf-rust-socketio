@@ -7,10 +7,10 @@ use tf_rust_engineio::client::ClientBuilder as EngineIoClientBuilder;
 use tf_rust_engineio::header::{HeaderMap, HeaderValue};
 use url::Url;
 
-use crate::client::callback::{SocketAnyCallback, SocketCallback};
+use crate::client::callback::{SocketAnyCallback, SocketCallback, SocketCloseCallback};
 use crate::error::Result;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::AtomicU64, Arc, Mutex};
 
 use crate::socket::Socket as InnerSocket;
 
@@ -36,6 +36,10 @@ pub struct ClientBuilder {
     pub(crate) address: String,
     on: Arc<Mutex<HashMap<Event, Callback<SocketCallback>>>>,
     on_any: Arc<Mutex<Option<Callback<SocketAnyCallback>>>>,
+    on_close_with_session: Arc<Mutex<Option<Callback<SocketCloseCallback>>>>,
+    // Session counter shared with every RawClient this builder creates, so it
+    // survives reconnects (each reconnect builds a fresh RawClient).
+    pub(crate) session_epoch: Arc<AtomicU64>,
     namespace: String,
     tls_config: Option<TlsConnector>,
     opening_headers: Option<HeaderMap>,
@@ -88,6 +92,8 @@ impl ClientBuilder {
             address: address.into(),
             on: Arc::new(Mutex::new(HashMap::new())),
             on_any: Arc::new(Mutex::new(None)),
+            on_close_with_session: Arc::new(Mutex::new(None)),
+            session_epoch: Arc::new(AtomicU64::new(0)),
             namespace: "/".to_owned(),
             tls_config: None,
             opening_headers: None,
@@ -208,6 +214,31 @@ impl ClientBuilder {
         let callback = Some(Callback::<SocketAnyCallback>::new(callback));
         // SAFETY: Lock is held for such amount of time no code paths lead to a panic while lock is held
         *self.on_any.lock().unwrap() = callback;
+        self
+    }
+
+    /// Registers a close callback that carries the session epoch of the dying
+    /// session. The existing `on(Event::Close, ...)` chain keeps firing; both
+    /// may be registered at the same time.
+    ///
+    /// # Example
+    /// ```rust
+    /// use tf_rust_socketio::ClientBuilder;
+    ///
+    /// let client = ClientBuilder::new("http://localhost:4200/")
+    ///     .on_close_with_session(|payload, epoch, _client| {
+    ///         println!("{:?} from session {epoch}", payload);
+    ///     })
+    ///     .connect();
+    /// ```
+    #[allow(unused_mut)]
+    pub fn on_close_with_session<F>(mut self, callback: F) -> Self
+    where
+        F: FnMut(Payload, u64, RawClient) + 'static + Send,
+    {
+        let callback = Some(Callback::<SocketCloseCallback>::new(callback));
+        // SAFETY: Lock is held for such amount of time no code paths lead to a panic while lock is held
+        *self.on_close_with_session.lock().unwrap() = callback;
         self
     }
 
@@ -367,6 +398,8 @@ impl ClientBuilder {
             &self.namespace,
             self.on,
             self.on_any,
+            self.on_close_with_session,
+            self.session_epoch,
             self.auth,
         )?;
         socket.connect()?;

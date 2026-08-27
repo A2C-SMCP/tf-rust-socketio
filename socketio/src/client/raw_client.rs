@@ -5,11 +5,14 @@ pub(crate) use crate::{event::CloseReason, event::Event, payload::Payload};
 use rand::{thread_rng, Rng};
 use serde_json::Value;
 
-use crate::client::callback::{SocketAnyCallback, SocketCallback};
+use crate::client::callback::{SocketAnyCallback, SocketCallback, SocketCloseCallback};
 use crate::error::Result;
 use std::collections::HashMap;
 use std::ops::DerefMut;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -36,11 +39,16 @@ pub struct RawClient {
     socket: InnerSocket,
     on: Arc<Mutex<HashMap<Event, Callback<SocketCallback>>>>,
     on_any: Arc<Mutex<Option<Callback<SocketAnyCallback>>>>,
+    on_close_with_session: Arc<Mutex<Option<Callback<SocketCloseCallback>>>>,
     outstanding_acks: Arc<Mutex<Vec<Ack>>>,
     // namespace, for multiplexing messages
     nsp: String,
     // Data send in the opening packet (commonly used as for auth)
     auth: Option<Value>,
+    // Shared session counter: incremented in `connect()` (one session per
+    // successful connect); shared across reconnects, which build a fresh
+    // RawClient while keeping this counter (issue #15).
+    session_epoch: Arc<AtomicU64>,
 }
 
 impl RawClient {
@@ -53,6 +61,8 @@ impl RawClient {
         namespace: T,
         on: Arc<Mutex<HashMap<Event, Callback<SocketCallback>>>>,
         on_any: Arc<Mutex<Option<Callback<SocketAnyCallback>>>>,
+        on_close_with_session: Arc<Mutex<Option<Callback<SocketCloseCallback>>>>,
+        session_epoch: Arc<AtomicU64>,
         auth: Option<Value>,
     ) -> Result<Self> {
         Ok(RawClient {
@@ -60,8 +70,10 @@ impl RawClient {
             nsp: namespace.into(),
             on,
             on_any,
+            on_close_with_session,
             outstanding_acks: Arc::new(Mutex::new(Vec::new())),
             auth,
+            session_epoch,
         })
     }
 
@@ -78,6 +90,11 @@ impl RawClient {
         let open_packet = Packet::new(PacketId::Connect, self.nsp.clone(), auth, None, 0, None);
 
         self.socket.send(open_packet)?;
+
+        // Only a successful handshake + CONNECT counts as a session (issue
+        // #15); failed reconnect attempts return via `?` above without
+        // bumping the epoch.
+        self.session_epoch.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -211,11 +228,11 @@ impl RawClient {
         let _ = self.socket.send(disconnect_packet);
         self.socket.disconnect()?;
 
-        let _ = self.callback(
-            &Event::Close,
+        // trigger on_close (with the current session's epoch, issue #15)
+        self.callback_close(
             CloseReason::IOClientDisconnect.as_str(),
-            None,
-        ); // trigger on_close
+            self.session_epoch.load(Ordering::Relaxed),
+        )?;
         Ok(())
     }
 
@@ -351,6 +368,32 @@ impl RawClient {
         Ok(())
     }
 
+    /// Fires the close chain for the given reason: the legacy
+    /// `on(Event::Close)` registration first, then `on_close_with_session`
+    /// with this session's epoch (issue #15). The sync client dispatches
+    /// inline on a single reader thread, so the epoch is read here — it can
+    /// not have been bumped by a concurrent reconnect.
+    ///
+    /// The close-with-session callback is taken out of the lock and executed
+    /// without the mutex held: it receives a `RawClient`, and the natural
+    /// cleanup it performs (`disconnect()`) re-enters `callback_close`, which
+    /// would deadlock on the non-reentrant std Mutex. The callback is put back
+    /// afterwards (same serial dispatch, no lock crossed by user code).
+    fn callback_close(&self, reason: &str, epoch: u64) -> Result<()> {
+        self.callback(&Event::Close, reason, None)?;
+
+        let callback = {
+            let mut close = self.on_close_with_session.lock()?;
+            close.take()
+        };
+        if let Some(mut callback) = callback {
+            callback.deref_mut()(Payload::from(reason), epoch, self.clone());
+            *self.on_close_with_session.lock()? = Some(callback);
+        }
+
+        Ok(())
+    }
+
     /// Handles the incoming acks and classifies what callbacks to call and how.
     #[inline]
     fn handle_ack(&self, socket_packet: &Packet) -> Result<()> {
@@ -464,10 +507,9 @@ impl RawClient {
                     self.callback(&Event::Connect, "", None)?;
                 }
                 PacketId::Disconnect => {
-                    self.callback(
-                        &Event::Close,
+                    self.callback_close(
                         CloseReason::IOServerDisconnect.as_str(),
-                        None,
+                        self.session_epoch.load(Ordering::Relaxed),
                     )?;
                 }
                 PacketId::ConnectError => {
