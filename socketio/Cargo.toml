@@ -36,6 +36,11 @@ serde = "1.0.215"
 [dev-dependencies]
 cargo-tarpaulin = "0.18.5"
 serial_test = "3.0.0"
+socketioxide = "0.16.3"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies.tokio]
 version = "1.40.0"

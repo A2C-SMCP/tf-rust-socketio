@@ -149,12 +149,10 @@ impl Socket {
             self.handle.spawn(async move { on_close(()).await });
         }
 
-        self.emit(Packet::new(PacketId::Close, Bytes::new()))
-            .await?;
-
+        let result = self.emit(Packet::new(PacketId::Close, Bytes::new())).await;
+        // Local teardown is terminal even if the peer cannot receive CLOSE.
         self.connected.store(false, Ordering::Release);
-
-        Ok(())
+        result
     }
 
     /// Sends a packet to the server.
