@@ -111,6 +111,11 @@ pub struct Client {
     // (Close/Error notifications of a dead session) survive a stream-end
     // abort but are cut by a manual disconnect.
     dispatch_tasks: Arc<std::sync::Mutex<Vec<DispatchTask>>>,
+    // The reader owns all automatic reconnect work (auth, handshake and backoff).
+    // Keep its handle across Client clones so explicit teardown can cancel and
+    // join it before closing the socket it may otherwise replace.
+    reader_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    disconnect_operation: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Client {
@@ -128,6 +133,8 @@ impl Client {
             disconnect_reason: Arc::new(RwLock::new(DisconnectReason::default())),
             session_epoch: Arc::new(AtomicU64::new(0)),
             dispatch_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+            reader_task: Arc::new(std::sync::Mutex::new(None)),
+            disconnect_operation: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -240,7 +247,10 @@ impl Client {
 
         let mut client_clone = self.clone();
 
-        tokio::runtime::Handle::current().spawn(async move {
+        // Register while holding the slot lock: an immediate Connect callback
+        // may call disconnect on another runtime worker before spawn returns.
+        let mut reader_task = self.reader_task.lock()?;
+        *reader_task = Some(tokio::runtime::Handle::current().spawn(async move {
             loop {
                 let mut stream = client_clone.as_stream().await;
                 // Consume the stream until it returns None and the stream is closed.
@@ -322,7 +332,7 @@ impl Client {
                     break;
                 }
             }
-        });
+        }));
 
         Ok(())
     }
@@ -481,25 +491,61 @@ impl Client {
     ///     socket.disconnect().await;
     /// }
     /// ```
+    /// Stops the reader and all automatic reconnect work before closing the
+    /// transport. Repeated calls (including through clones) are idempotent.
+    /// Once polled, cleanup continues even if the calling future is dropped.
+    /// Transport errors are returned only after local teardown is attempted.
     pub async fn disconnect(&self) -> Result<()> {
-        *(self.disconnect_reason.write().await) = DisconnectReason::Manual;
+        // Teardown has its own owner. Aborting the reader drops ReaderState,
+        // which also aborts application callbacks; one of those callbacks may
+        // be this very caller. Dropping the caller must not cancel cleanup.
+        let client = self.clone();
+        tokio::spawn(async move {
+            let _operation = client.disconnect_operation.lock().await;
+            *(client.disconnect_reason.write().await) = DisconnectReason::Manual;
+            let reader = client.reader_task.lock()?.take();
+            if let Some(reader) = reader {
+                reader.abort();
+                // Joining is the fence: no in-flight reconnect can install a
+                // new socket after the transport below has been closed.
+                if let Err(error) = reader.await {
+                    if !error.is_cancelled() {
+                        error!("Socket.IO reader failed during disconnect: {error}");
+                    }
+                }
+            }
 
-        let disconnect_packet =
-            Packet::new(PacketId::Disconnect, self.nsp.clone(), None, None, 0, None);
-
-        self.socket.read().await.send(disconnect_packet).await?;
-        self.socket.read().await.disconnect().await?;
-
-        // Abort all in-flight dispatch tasks (including terminal ones) after
-        // the teardown above: no user callback may fire late against the
-        // dead connection (issue #12). Aborts are fired last so a dispatch
-        // task that itself calls `disconnect()` has already sent the packet;
-        // it is then cancelled at its next await point. (Task IDs are not
-        // available on the pinned tokio 1.40, so per-caller exclusion is not
-        // possible; the ordering above makes it unnecessary.)
-        self.abort_dispatch(true);
-
-        Ok(())
+            let disconnect_packet = Packet::new(
+                PacketId::Disconnect,
+                client.nsp.clone(),
+                None,
+                None,
+                0,
+                None,
+            );
+            let socket = client.socket.read().await;
+            let send_result =
+                tokio::time::timeout(Duration::from_secs(1), socket.send(disconnect_packet))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Socket.IO disconnect packet timed out",
+                        )
+                        .into())
+                    });
+            // A broken transport may reject the namespace frame. Still close
+            // Engine.IO and abort dispatch; never return early on that error.
+            let close_result = socket.disconnect().await;
+            client.abort_dispatch(true);
+            close_result?;
+            match send_result {
+                Err(Error::IllegalActionBeforeOpen()) => Ok(()),
+                result => result,
+            }
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 
     /// Sends a message to the server but `alloc`s an `ack` to check whether the

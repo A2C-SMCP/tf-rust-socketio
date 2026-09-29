@@ -22,8 +22,9 @@ use crate::{
 #[derive(Clone)]
 pub struct Socket {
     handle: Handle,
-    transport: Arc<Mutex<AsyncTransportType>>,
-    transport_raw: AsyncTransportType,
+    transport: Arc<std::sync::Mutex<Option<AsyncTransportType>>>,
+    send_lock: Arc<Mutex<()>>,
+    closing: tokio::sync::watch::Sender<bool>,
     on_close: OptionalCallback<()>,
     on_data: OptionalCallback<Bytes>,
     on_error: OptionalCallback<String>,
@@ -55,8 +56,9 @@ impl Socket {
             on_error,
             on_open,
             on_packet,
-            transport: Arc::new(Mutex::new(transport.clone())),
-            transport_raw: transport,
+            transport: Arc::new(std::sync::Mutex::new(Some(transport))),
+            send_lock: Arc::new(Mutex::new(())),
+            closing: tokio::sync::watch::channel(false).0,
             connected: Arc::new(AtomicBool::default()),
             last_ping: Arc::new(Mutex::new(Instant::now())),
             last_pong: Arc::new(Mutex::new(Instant::now())),
@@ -68,8 +70,15 @@ impl Socket {
     /// Opens the connection to a specified server. The first Pong packet is sent
     /// to the server to trigger the Ping-cycle.
     pub async fn connect(&self) -> Result<()> {
-        // SAFETY: Has valid handshake due to type
-        self.connected.store(true, Ordering::Release);
+        // A retired transport cannot be reopened through a surviving clone.
+        {
+            let transport = self.transport.lock()?;
+            if transport.is_none() {
+                return Err(Error::IllegalActionBeforeOpen());
+            }
+            // Publish under the same ownership lock used by disconnect.
+            self.connected.store(true, Ordering::Release);
+        }
 
         if let Some(on_open) = self.on_open.as_ref() {
             let on_open = on_open.clone();
@@ -144,17 +153,32 @@ impl Socket {
     }
 
     pub async fn disconnect(&self) -> Result<()> {
+        let transport = {
+            let mut transport = self.transport.lock()?;
+            self.connected.store(false, Ordering::Release);
+            self.closing.send_replace(true);
+            transport.take()
+        };
+        let Some(transport) = transport else {
+            return Ok(());
+        };
         if let Some(on_close) = self.on_close.as_ref() {
             let on_close = on_close.clone();
             self.handle.spawn(async move { on_close(()).await });
         }
-
-        self.emit(Packet::new(PacketId::Close, Bytes::new()))
-            .await?;
-
-        self.connected.store(false, Ordering::Release);
-
-        Ok(())
+        // The final packet is best effort. Local ownership is already revoked, and a
+        // peer that never answers its POST cannot retain the cleanup task forever.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let _send = self.send_lock.lock().await;
+            transport
+                .as_transport()
+                .emit(Packet::new(PacketId::Close, Bytes::new()).into(), false)
+                .await
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "Engine.IO close timed out")
+        })?
     }
 
     /// Sends a packet to the server.
@@ -175,10 +199,21 @@ impl Socket {
             packet.into()
         };
 
-        let lock = self.transport.lock().await;
-        let fut = lock.as_transport().emit(data, is_binary);
-
-        if let Err(error) = fut.await {
+        let mut closing = self.closing.subscribe();
+        let transport = self
+            .transport
+            .lock()?
+            .clone()
+            .ok_or(Error::IllegalActionBeforeOpen())?;
+        let result = tokio::select! {
+            biased;
+            _ = async { if !*closing.borrow_and_update() { let _ = closing.changed().await; } } => Err(Error::IllegalActionBeforeOpen()),
+            result = async {
+                let _send = self.send_lock.lock().await;
+                transport.as_transport().emit(data, is_binary).await
+            } => result,
+        };
+        if let Err(error) = result {
             self.call_error_callback(error.to_string());
             return Err(error);
         }
@@ -244,29 +279,34 @@ impl Socket {
     pub(crate) fn as_stream<'a>(
         &'a self,
     ) -> Pin<Box<dyn Stream<Item = Result<Packet>> + Send + 'a>> {
-        stream::unfold(
-            Self::stream(self.transport_raw.clone()),
-            |mut stream| async {
-                // Wait for the next payload or until we should have received the next ping.
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(self.time_to_next_ping().await),
-                    stream.next(),
-                )
-                .await
-                {
-                    Ok(result) => result.map(|result| (result, stream)),
-                    // We didn't receive a ping in time and now consider the connection as closed.
-                    Err(_) => {
-                        // Be nice and disconnect properly.
-                        if let Err(e) = self.disconnect().await {
-                            Some((Err(e), stream))
-                        } else {
-                            Some((Err(Error::PingTimeout()), stream))
-                        }
+        let transport = self
+            .transport
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(transport) = transport else {
+            return Box::pin(stream::empty());
+        };
+        stream::unfold(Self::stream(transport), |mut stream| async {
+            // Wait for the next payload or until we should have received the next ping.
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(self.time_to_next_ping().await),
+                stream.next(),
+            )
+            .await
+            {
+                Ok(result) => result.map(|result| (result, stream)),
+                // We didn't receive a ping in time and now consider the connection as closed.
+                Err(_) => {
+                    // Be nice and disconnect properly.
+                    if let Err(e) = self.disconnect().await {
+                        Some((Err(e), stream))
+                    } else {
+                        Some((Err(Error::PingTimeout()), stream))
                     }
                 }
-            },
-        )
+            }
+        })
         .boxed()
     }
 }

@@ -53,13 +53,11 @@ impl Socket {
     /// Disconnects from the server by sending a socket.io `Disconnect` packet. This results
     /// in the underlying engine.io transport to get closed as well.
     pub async fn disconnect(&self) -> Result<()> {
-        if self.is_engineio_connected() {
-            self.engine_client.disconnect().await?;
-        }
-        if self.connected.load(Ordering::Acquire) {
-            self.connected.store(false, Ordering::Release);
-        }
-        Ok(())
+        self.connected.store(false, Ordering::Release);
+        self.generator.close().await;
+        let result = self.engine_client.disconnect().await;
+        self.connected.store(false, Ordering::Release);
+        result.map_err(Into::into)
     }
 
     /// Sends a `socket.io` packet to the server using the `engine.io` client.

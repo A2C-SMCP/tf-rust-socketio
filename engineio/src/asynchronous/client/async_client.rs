@@ -30,7 +30,7 @@ impl Client {
     }
 
     pub async fn close(&self) -> Result<()> {
-        self.socket.disconnect().await
+        self.disconnect().await
     }
 
     /// Opens the connection to a specified server. The first Pong packet is sent
@@ -41,7 +41,14 @@ impl Client {
 
     /// Disconnects the connection.
     pub async fn disconnect(&self) -> Result<()> {
-        self.socket.disconnect().await
+        let client = self.clone();
+        tokio::spawn(async move {
+            // Clear shared in-flight GET/stream ownership even while aliases remain alive.
+            client.generator.close().await;
+            client.socket.disconnect().await
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 
     /// Sends a packet to the server.

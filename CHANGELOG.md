@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ## Overview
 
+* [`0.9.3`](#093) - _2026.09.29_
 * [`0.9.2`](#092) - _2026.08.27_
 * [`0.9.1`](#091) - _2026.08.26_
 * [`0.9.0`](#090) - _2026.08.24_
@@ -37,6 +38,28 @@ The format is based on [Keep a Changelog], and this project adheres to
 * [`0.2.0`](#020) – _2021.03.13_
 * [`0.1.1`](#011) – _2021.01.10_
 * [`0.1.0`](#010) – _2021.01.05_
+
+## <a name="093">[0.9.3] - _Explicit disconnect terminates automatic reconnect work_ </a>
+
+_2026.09.29_
+
+### Fixed
+- Async Socket.IO disconnect cancels and joins its reader before closing the transport,
+  including reconnect callbacks, retry backoff and in-flight HTTP handshakes.
+- Teardown continues when its caller is cancelled, including calls from application
+  callbacks, and repeated disconnects through client clones are idempotent.
+- Failure to send a closing frame no longer skips local Socket.IO or Engine.IO teardown.
+  Transport errors are still returned after cleanup is attempted.
+- Each graceful closing packet has a one-second deadline; an unresponsive peer cannot
+  retain cleanup indefinitely. Shared polling GET and WebSocket transport ownership is
+  released even while application Client aliases remain alive.
+- Socket.IO now requires Engine.IO 0.9.3 or newer so both halves of the teardown fix
+  are present in registry installations.
+
+### Tests
+- Ten real TCP lifecycle regression cases cover reconnect cancellation, normal
+  reconnection, callback/caller cancellation, failed or stalled CLOSE frames, concurrent
+  disconnects and TCP EOF for installed transports with surviving client aliases.
 
 ## <a name="092">[0.9.2] - _Close notifications carry the dying session's epoch_ </a>
 
@@ -453,4 +476,3 @@ _2021.01.05_
     * custom events like "foo", "on_payment", etc.
     * send json-data to the server (recommended to use serde_json as it provides safe handling of json data).
     * send json-data to the server and receive an ack with a possible message.
-

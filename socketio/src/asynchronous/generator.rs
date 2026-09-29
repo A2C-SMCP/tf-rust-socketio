@@ -27,7 +27,11 @@ impl<T> Stream for StreamGenerator<T> {
     }
 }
 
-impl<T> StreamGenerator<T> {
+impl<T: Send + 'static> StreamGenerator<T> {
+    pub(crate) async fn close(&self) {
+        *self.inner.lock().await = Box::pin(futures_util::stream::empty());
+    }
+
     pub(crate) fn new(generator_stream: Generator<Result<T>>) -> Self {
         StreamGenerator {
             inner: Arc::new(Mutex::new(generator_stream)),
