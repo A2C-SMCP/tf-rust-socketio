@@ -524,7 +524,16 @@ impl Client {
                 None,
             );
             let socket = client.socket.read().await;
-            let send_result = socket.send(disconnect_packet).await;
+            let send_result =
+                tokio::time::timeout(Duration::from_secs(1), socket.send(disconnect_packet))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Socket.IO disconnect packet timed out",
+                        )
+                        .into())
+                    });
             // A broken transport may reject the namespace frame. Still close
             // Engine.IO and abort dispatch; never return early on that error.
             let close_result = socket.disconnect().await;
